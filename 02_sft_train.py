@@ -10,11 +10,13 @@
 # ── GPU 지정: torch import 이전에 환경변수 설정 ──────────────────────────
 import sys, os, argparse
 
+
 def _early_parse_gpus():
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--gpus", type=str, default=None)
     args, _ = p.parse_known_args()
     return args.gpus
+
 
 _gpus = _early_parse_gpus()
 if _gpus is not None:
@@ -33,6 +35,7 @@ from datasets import Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import LoraConfig, get_peft_model
 from trl import SFTTrainer, SFTConfig
+
 try:
     from trl import DataCollatorForCompletionOnlyLM
 except ImportError:
@@ -42,10 +45,20 @@ except ImportError:
         DataCollatorForCompletionOnlyLM = None
 
 from config import (
-    SYNTH_PKL, VITAL_MAP_PKL, SFT_MODELS, SFT_OUT,
-    LORA_R, LORA_ALPHA, LORA_DROPOUT, LORA_TARGET_MODULES, LORA_TARGET_MODULES_GEMMA4,
-    SFT_CONFIG, SYSTEM_PROMPT, build_user_prompt,
-    EMR_PREOP_SUM_COL, EMR_PREMED_COL,
+    SYNTH_PKL,
+    VITAL_MAP_PKL,
+    SFT_MODELS,
+    SFT_OUT,
+    LORA_R,
+    LORA_ALPHA,
+    LORA_DROPOUT,
+    LORA_TARGET_MODULES,
+    LORA_TARGET_MODULES_GEMMA4,
+    SFT_CONFIG,
+    SYSTEM_PROMPT,
+    build_user_prompt,
+    EMR_PREOP_SUM_COL,
+    EMR_PREMED_COL,
 )
 
 MAX_SEQ_LEN = 2048
@@ -54,6 +67,7 @@ MAX_SEQ_LEN = 2048
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # EMR 텍스트 추출
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 def _get(row, col) -> str:
     try:
@@ -74,13 +88,16 @@ def _get(row, col) -> str:
 
 
 def _emr_text(row) -> str:
-    preop  = _get(row, EMR_PREOP_SUM_COL)
+    preop = _get(row, EMR_PREOP_SUM_COL)
     premed = _get(row, EMR_PREMED_COL)
-    anrec  = _get(row, ("마취기록", "기록", ""))
+    anrec = _get(row, ("마취기록", "기록", ""))
     parts = []
-    if preop:  parts.append(f"[마취전 환자상태 요약]\n{preop}")
-    if premed: parts.append(f"[수술전 준비사항 및 Premedication]\n{premed}")
-    if anrec:  parts.append(f"[마취기록]\n{anrec}")
+    if preop:
+        parts.append(f"[마취전 환자상태 요약]\n{preop}")
+    if premed:
+        parts.append(f"[수술전 준비사항 및 Premedication]\n{premed}")
+    if anrec:
+        parts.append(f"[마취기록]\n{anrec}")
     return "\n\n".join(parts)
 
 
@@ -88,10 +105,11 @@ def _emr_text(row) -> str:
 # 데이터 포맷
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 def _chat(system, user, assistant, tokenizer) -> str:
     msgs = [
-        {"role": "system",    "content": system},
-        {"role": "user",      "content": user},
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
         {"role": "assistant", "content": assistant},
     ]
     return tokenizer.apply_chat_template(msgs, tokenize=False)
@@ -103,18 +121,18 @@ def build_dataset(synth_df, vital_map, tokenizer) -> Dataset:
     no_vital = 0
 
     for _, row in synth_df.iterrows():
-        emr    = _emr_text(row)
+        emr = _emr_text(row)
         try:
             v = row["수술 ID"]
             sid = int(v.iloc[0]) if hasattr(v, "iloc") else int(v)
         except Exception:
             sid = -1
-        vital  = vital_map.get(sid, "")
+        vital = vital_map.get(sid, "")
         if not vital:
             no_vital += 1
         user_base = build_user_prompt(emr, vital)
 
-        chosen   = str(row.get("chosen",   ""))
+        chosen = str(row.get("chosen", ""))
         rejected = str(row.get("rejected", ""))
 
         # (1) generation
@@ -142,8 +160,9 @@ def build_dataset(synth_df, vital_map, tokenizer) -> Dataset:
 # 학습
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 def train(args):
-    model_id   = str(SFT_MODELS[args.base])
+    model_id = str(SFT_MODELS[args.base])
     output_dir = SFT_OUT / f"{args.base}_{args.epochs}ep"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -152,7 +171,9 @@ def train(args):
     print(f"  모델:     {model_id}")
     print(f"  Epoch:    {args.epochs}")
     print(f"  출력:     {output_dir}")
-    print(f"  GPU:      {n_gpu}개  ({torch.cuda.get_device_name(0) if n_gpu else 'CPU'})")
+    print(
+        f"  GPU:      {n_gpu}개  ({torch.cuda.get_device_name(0) if n_gpu else 'CPU'})"
+    )
 
     # 데이터
     print("\n데이터 로드 중...")
@@ -178,11 +199,19 @@ def train(args):
     model.config.use_cache = False
 
     # LoRA
-    _lora_targets = LORA_TARGET_MODULES_GEMMA4 if args.base == "gemma4" else LORA_TARGET_MODULES
+    _lora_targets = (
+        LORA_TARGET_MODULES_GEMMA4 if args.base == "gemma4" else LORA_TARGET_MODULES
+    )
+    _lora_targets = (
+        LORA_TARGET_MODULES_GEMMA4 if args.base == "gemma4" else LORA_TARGET_MODULES
+    )
     lora_cfg = LoraConfig(
-        r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT,
+        r=LORA_R,
+        lora_alpha=LORA_ALPHA,
+        lora_dropout=LORA_DROPOUT,
         target_modules=_lora_targets,
-        bias="none", task_type="CAUSAL_LM",
+        bias="none",
+        task_type="CAUSAL_LM",
     )
     model = get_peft_model(model, lora_cfg)
     model.print_trainable_parameters()
@@ -240,8 +269,11 @@ def train(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Synthetic SFT with LoRA")
-    parser.add_argument("--base",   choices=["llama", "qwen", "gemma4", "qwen35", "hari"], default="llama")
+    parser.add_argument(
+        "--base", choices=["llama", "qwen", "gemma4", "qwen35", "hari"], default="llama"
+    )
     parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--gpus",   type=str, default=None,
-                        help="사용할 GPU 번호. 예: '0' 또는 '0,1,2,3'")
+    parser.add_argument(
+        "--gpus", type=str, default=None, help="사용할 GPU 번호. 예: '0' 또는 '0,1,2,3'"
+    )
     train(parser.parse_args())

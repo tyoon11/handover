@@ -14,9 +14,14 @@ import sys
 import pandas as pd
 
 from config import (
-    EMR_PKL, VITAL_PKL,
-    GOLD_PKL, GOLD_REF_PKL,
-    SFT_PKL, SELFJUDGE_PKL, RLHF_PKL, SYNTH_PKL,
+    EMR_PKL,
+    VITAL_PKL,
+    GOLD_PKL,
+    GOLD_REF_PKL,
+    SFT_PKL,
+    SELFJUDGE_PKL,
+    RLHF_PKL,
+    SYNTH_PKL,
     VITAL_MAP_PKL,
     VIT_SID_COL,
 )
@@ -26,14 +31,14 @@ from vital_summarizer import build_vital_map
 def check_pkl_exists():
     """이미 존재하는 pkl 파일 확인."""
     pkls = {
-        "EMR (raw)":       EMR_PKL,
-        "Vital":           VITAL_PKL,
-        "Gold (228col)":   GOLD_PKL,
+        "EMR (raw)": EMR_PKL,
+        "Vital": VITAL_PKL,
+        "Gold (228col)": GOLD_PKL,
         "Gold (8col ref)": GOLD_REF_PKL,
-        "SFT":             SFT_PKL,
-        "SelfJudge":       SELFJUDGE_PKL,
-        "RLHF":            RLHF_PKL,
-        "Synth+Score":     SYNTH_PKL,
+        "SFT": SFT_PKL,
+        "SelfJudge": SELFJUDGE_PKL,
+        "RLHF": RLHF_PKL,
+        "Synth+Score": SYNTH_PKL,
     }
     print("=" * 60)
     print("[파일 존재 확인]")
@@ -50,11 +55,11 @@ def check_pkl_exists():
 
 def verify_sid_match(emr_df: pd.DataFrame, vital_df: pd.DataFrame):
     """EMR '수술 ID'와 Vital '수술ID' 매칭 현황 출력."""
-    emr_sids   = set(emr_df["수술 ID"].astype(int))
+    emr_sids = set(emr_df["수술 ID"].astype(int))
     vital_sids = set(vital_df[VIT_SID_COL].astype(int))
 
-    both    = emr_sids & vital_sids
-    emr_only  = emr_sids  - vital_sids
+    both = emr_sids & vital_sids
+    emr_only = emr_sids - vital_sids
     vital_only = vital_sids - emr_sids
 
     print("[수술ID 매칭 현황]")
@@ -96,9 +101,12 @@ def sample_check(vital_map: dict, emr_df: pd.DataFrame, n: int = 3):
         if mask.any():
             try:
                 opname = emr_df.loc[mask, ("수술", "수술명", "")].values[0]
-                age    = emr_df.loc[mask, ("수술", "수술당시나이", "")].values[0]
-                dept   = emr_df.loc[mask, ("수술", "수술진료과", "")].values[0] \
-                         if ("수술", "수술진료과", "") in emr_df.columns else "N/A"
+                age = emr_df.loc[mask, ("수술", "수술당시나이", "")].values[0]
+                dept = (
+                    emr_df.loc[mask, ("수술", "수술진료과", "")].values[0]
+                    if ("수술", "수술진료과", "") in emr_df.columns
+                    else "N/A"
+                )
             except Exception:
                 opname = age = dept = "N/A"
         else:
@@ -136,11 +144,11 @@ def main():
     # 6. SFT/RLAIF 데이터 요약 출력
     print("\n[기존 Split 데이터 요약]")
     for name, path in [
-        ("SFT",      SFT_PKL),
-        ("SelfJudge",SELFJUDGE_PKL),
-        ("RLHF",     RLHF_PKL),
-        ("Gold",     GOLD_PKL),
-        ("Synth",    SYNTH_PKL),
+        ("SFT", SFT_PKL),
+        ("SelfJudge", SELFJUDGE_PKL),
+        ("RLHF", RLHF_PKL),
+        ("Gold", GOLD_PKL),
+        ("Synth", SYNTH_PKL),
     ]:
         if path.exists():
             df = pd.read_pickle(path)

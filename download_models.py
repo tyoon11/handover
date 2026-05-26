@@ -6,8 +6,11 @@ download_models.py — 실험에 필요한 HuggingFace 모델 다운로드
   - meta-llama/Llama-3.1-8B-Instruct
   - Qwen/Qwen3-8B
   - google/gemma-4-E4B-it
+  - google/gemma-4-31B-it
+  - google/medgemma-27b-it
   - Qwen/Qwen3.5-9B
   - snuh/hari-q3-8b
+  
   [평가]
   - prometheus-eval/prometheus-7b-v2.0
   - google/flan-t5-large
@@ -48,6 +51,12 @@ MODELS = {
         "desc":      "비교 베이스 (Google Gemma 4 E4B)",
         "gated":     True,   # Google 라이선스 동의 필요
     },
+    "gemma4-31b": {
+        "repo_id":   "google/gemma-4-31B-it",
+        "local_dir": MODEL_DIR / "gemma-4-31B-it",
+        "desc":      "비교 베이스 (Google Gemma 4 31B)",
+        "gated":     True,   # Google 라이선스 동의 필요
+    },
     "qwen35": {
         "repo_id":   "Qwen/Qwen3.5-9B",
         "local_dir": MODEL_DIR / "Qwen3.5-9B",
@@ -60,6 +69,13 @@ MODELS = {
         "desc":      "서울대병원 특화 모델",
         "gated":     False,
     },
+    "medgemma27b": {
+        "repo_id":   "google/medgemma-27b-it",
+        "local_dir": MODEL_DIR / "medgemma-27b-it",
+        "desc":      "medgemma judge",
+        "gated":     True,
+    },
+
     # 평가
     "prometheus": {
         "repo_id":   "prometheus-eval/prometheus-7b-v2.0",
@@ -115,8 +131,28 @@ def print_status(targets):
     print()
 
 
+def _patch_httpx_ssl():
+    """SSL 인증서 검증 우회 (self-signed certificate 환경 대응)"""
+    try:
+        import httpx
+        _orig_init = httpx.Client.__init__
+        def _patched_init(self, *a, **kw):
+            kw['verify'] = False
+            _orig_init(self, *a, **kw)
+        httpx.Client.__init__ = _patched_init
+
+        _orig_async_init = httpx.AsyncClient.__init__
+        def _patched_async_init(self, *a, **kw):
+            kw['verify'] = False
+            _orig_async_init(self, *a, **kw)
+        httpx.AsyncClient.__init__ = _patched_async_init
+    except ImportError:
+        pass
+
+
 def download_one(key: str, token, force: bool) -> bool:
     from huggingface_hub import snapshot_download
+    _patch_httpx_ssl()
 
     info      = MODELS[key]
     repo_id   = info["repo_id"]
@@ -193,8 +229,7 @@ def main():
         print(f"✗ 실패: {', '.join(fail_list)}")
         print()
         print("  팁:")
-        print("  - gated 모델(llama, gemma4): HF 라이선스 동의 후 --token <HF_TOKEN>")
-        print("  - 네트워크 차단 환경: export HF_ENDPOINT=https://hf-mirror.com")
+        print("  - gated 모델(llama, gemma4, gemma4-31b): HF 라이선스 동의 후 --token <HF_TOKEN>")
         sys.exit(1)
     print()
 

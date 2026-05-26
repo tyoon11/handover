@@ -9,8 +9,13 @@ import pandas as pd
 from typing import Optional
 
 from config import (
-    VIT_SID_COL, VIT_TIME_COL, VIT_ITEM_COL, VIT_VAL_COL,
-    VITAL_ITEMS, BP_ITEMS, IBP_ITEMS,
+    VIT_SID_COL,
+    VIT_TIME_COL,
+    VIT_ITEM_COL,
+    VIT_VAL_COL,
+    VITAL_ITEMS,
+    BP_ITEMS,
+    IBP_ITEMS,
 )
 
 warnings.filterwarnings("ignore")
@@ -20,51 +25,67 @@ warnings.filterwarnings("ignore")
 # 소아 연령 그룹별 Threshold
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 def _age_group(age: float) -> str:
-    if age < 1:   return "infant"
-    elif age < 3: return "toddler"
-    elif age < 6: return "preschool"
-    elif age < 12: return "school"
-    else:          return "adolescent"
+    if age < 1:
+        return "infant"
+    elif age < 3:
+        return "toddler"
+    elif age < 6:
+        return "preschool"
+    elif age < 12:
+        return "school"
+    else:
+        return "adolescent"
 
 
 HR_THRESH = {
-    "infant":     (100, 160),
-    "toddler":    (90,  150),
-    "preschool":  (80,  140),
-    "school":     (70,  130),
-    "adolescent": (60,  110),
+    "infant": (100, 160),
+    "toddler": (90, 150),
+    "preschool": (80, 140),
+    "school": (70, 130),
+    "adolescent": (60, 110),
 }
 
 SBP_HIGH = {
-    "infant":     100,
-    "toddler":    104,
-    "preschool":  108,
-    "school":     116,
+    "infant": 100,
+    "toddler": 104,
+    "preschool": 108,
+    "school": 116,
     "adolescent": 130,
 }
 
 DBP_THRESH = {
-    "infant":     (30, 65),
-    "toddler":    (35, 70),
-    "preschool":  (38, 72),
-    "school":     (40, 76),
+    "infant": (30, 65),
+    "toddler": (35, 70),
+    "preschool": (38, 72),
+    "school": (40, 76),
     "adolescent": (45, 82),
 }
 
-def sbp_low(age):  return 70.0 if age < 1 else (70 + 2*age if age <= 10 else 90.0)
-def mbp_low(age):  return 1.5 * age + 40.0
-def qtc_thresh(age): return 450.0 if age < 8 else 460.0
+
+def sbp_low(age):
+    return 70.0 if age < 1 else (70 + 2 * age if age <= 10 else 90.0)
+
+
+def mbp_low(age):
+    return 1.5 * age + 40.0
+
+
+def qtc_thresh(age):
+    return 450.0 if age < 8 else 460.0
+
 
 SPO2_WARN = 95.0
 SPO2_CRIT = 90.0
-TEMP_LOW  = 35.5
+TEMP_LOW = 35.5
 TEMP_HIGH = 38.0
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 파싱 유틸
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 def _parse_item_name(raw: str) -> str:
     """'HR <- HR <- 마취기록' → 'HR'"""
@@ -96,7 +117,8 @@ def _series(sub: pd.DataFrame, item: str) -> pd.Series:
 
 
 def _stat(s: pd.Series, unit: str = "") -> str:
-    if s.empty: return "데이터 없음"
+    if s.empty:
+        return "데이터 없음"
     u = f" {unit}" if unit else ""
     return f"중앙값 {s.median():.0f}{u} (범위 {s.min():.0f}–{s.max():.0f}{u})"
 
@@ -105,62 +127,84 @@ def _stat(s: pd.Series, unit: str = "") -> str:
 # 항목별 요약 함수
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 def _hr(s, age):
-    if s.empty: return ""
+    if s.empty:
+        return ""
     g = _age_group(age)
     brady, tachy = HR_THRESH[g]
     evs = []
-    nb = (s < brady).sum(); nt = (s > tachy).sum()
-    if nb: evs.append(f"서맥(<{brady}) {nb}회")
-    if nt: evs.append(f"빈맥(>{tachy}) {nt}회")
+    nb = (s < brady).sum()
+    nt = (s > tachy).sum()
+    if nb:
+        evs.append(f"서맥(<{brady}) {nb}회")
+    if nt:
+        evs.append(f"빈맥(>{tachy}) {nt}회")
     ev = f", 이벤트: {', '.join(evs)}" if evs else ", 이상 없음"
     return f"HR: {_stat(s, 'bpm')}{ev}"
 
 
 def _bp(item, s, age):
-    if s.empty: return ""
+    if s.empty:
+        return ""
     g = _age_group(age)
     evs = []
     if item in ("SBP", "ISBP1"):
         lo, hi = sbp_low(age), SBP_HIGH[g]
-        nl = (s < lo).sum(); nh = (s > hi).sum()
-        if nl: evs.append(f"저혈압(<{lo:.0f}) {nl}회")
-        if nh: evs.append(f"고혈압(>{hi}) {nh}회")
+        nl = (s < lo).sum()
+        nh = (s > hi).sum()
+        if nl:
+            evs.append(f"저혈압(<{lo:.0f}) {nl}회")
+        if nh:
+            evs.append(f"고혈압(>{hi}) {nh}회")
     elif item in ("MBP", "IMBP1"):
         lo = mbp_low(age)
         nl = (s < lo).sum()
-        if nl: evs.append(f"저혈압(<{lo:.0f}) {nl}회")
+        if nl:
+            evs.append(f"저혈압(<{lo:.0f}) {nl}회")
     elif item in ("DBP", "IDBP1"):
         lo, hi = DBP_THRESH[g]
-        nl = (s < lo).sum(); nh = (s > hi).sum()
-        if nl: evs.append(f"저(<{lo}) {nl}회")
-        if nh: evs.append(f"고(>{hi}) {nh}회")
+        nl = (s < lo).sum()
+        nh = (s > hi).sum()
+        if nl:
+            evs.append(f"저(<{lo}) {nl}회")
+        if nh:
+            evs.append(f"고(>{hi}) {nh}회")
     ev = f", 이벤트: {', '.join(evs)}" if evs else ", 이상 없음"
     return f"{item}: {_stat(s, 'mmHg')}{ev}"
 
 
 def _spo2(s):
-    if s.empty: return ""
+    if s.empty:
+        return ""
     evs = []
-    nc = (s < SPO2_CRIT).sum(); nw = (s < SPO2_WARN).sum()
-    if nc: evs.append(f"SpO2<90% {nc}회")
-    elif nw: evs.append(f"SpO2<95% {nw}회")
+    nc = (s < SPO2_CRIT).sum()
+    nw = (s < SPO2_WARN).sum()
+    if nc:
+        evs.append(f"SpO2<90% {nc}회")
+    elif nw:
+        evs.append(f"SpO2<95% {nw}회")
     ev = f", 이벤트: {', '.join(evs)}" if evs else ", 이상 없음"
     return f"SpO2: {_stat(s, '%')}{ev}"
 
 
 def _temp(s):
-    if s.empty: return ""
+    if s.empty:
+        return ""
     evs = []
-    nl = (s < TEMP_LOW).sum(); nh = (s > TEMP_HIGH).sum()
-    if nl: evs.append(f"저체온(<{TEMP_LOW}) {nl}회")
-    if nh: evs.append(f"발열(>{TEMP_HIGH}) {nh}회")
+    nl = (s < TEMP_LOW).sum()
+    nh = (s > TEMP_HIGH).sum()
+    if nl:
+        evs.append(f"저체온(<{TEMP_LOW}) {nl}회")
+    if nh:
+        evs.append(f"발열(>{TEMP_HIGH}) {nh}회")
     ev = f", 이벤트: {', '.join(evs)}" if evs else ", 이상 없음"
     return f"체온(T1): {_stat(s, '°C')}{ev}"
 
 
 def _qtc(s, age):
-    if s.empty: return ""
+    if s.empty:
+        return ""
     thresh = qtc_thresh(age)
     nl = (s > thresh).sum()
     if nl:
@@ -170,20 +214,24 @@ def _qtc(s, age):
 
 def _ebl(sub):
     rows = sub[sub["_item"] == "EBL"].copy()
-    if rows.empty: return ""
+    if rows.empty:
+        return ""
     v = pd.to_numeric(rows[VIT_VAL_COL], errors="coerce").dropna()
-    if v.empty: return ""
+    if v.empty:
+        return ""
     return f"EBL: {v.max():.0f} mL"
 
 
 def _uo(sub, weight_kg=None):
     rows = sub[sub["_item"] == "UO"].copy()
-    if rows.empty: return ""
+    if rows.empty:
+        return ""
     raw = rows[VIT_VAL_COL].astype(str).str.strip()
     if raw.str.upper().str.contains(r"NF|NO.?FOLEY", regex=True).any():
         return "UO: No Foley"
     v = pd.to_numeric(rows[VIT_VAL_COL], errors="coerce").dropna()
-    if v.empty: return ""
+    if v.empty:
+        return ""
     total = v.max()
     parts = [f"UO: {total:.0f} mL"]
     if weight_kg and weight_kg > 0:
@@ -197,6 +245,7 @@ def _uo(sub, weight_kg=None):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 메인 공개 API
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 def summarize_vitals(
     vital_df: pd.DataFrame,
@@ -253,19 +302,19 @@ def build_vital_map(vital_df: pd.DataFrame, emr_df: pd.DataFrame) -> dict:
     """
     # 나이 매핑: EMR 수술ID → 수술당시나이
     try:
-        sid_series  = emr_df["수술 ID"]
-        age_series  = emr_df[("수술", "수술당시나이", "")]
+        sid_series = emr_df["수술 ID"]
+        age_series = emr_df[("수술", "수술당시나이", "")]
         age_map = dict(zip(sid_series.astype(int), age_series.astype(float)))
     except Exception as e:
         print(f"[build_vital_map] 나이 매핑 실패: {e}, 기본값 5세 사용")
         age_map = {}
 
     vital_sids = vital_df[VIT_SID_COL].unique()
-    vital_map  = {}
+    vital_map = {}
 
     for i, sid in enumerate(vital_sids):
         sid_int = int(sid)
-        age     = age_map.get(sid_int, 5.0)
+        age = age_map.get(sid_int, 5.0)
         vital_map[sid_int] = summarize_vitals(vital_df, sid_int, age)
         if (i + 1) % 500 == 0:
             print(f"  [{i+1}/{len(vital_sids)}] 처리 중...")
@@ -280,6 +329,7 @@ def build_vital_map(vital_df: pd.DataFrame, emr_df: pd.DataFrame) -> dict:
 
 if __name__ == "__main__":
     from config import VITAL_PKL
+
     print("Vital pkl 로드 중...")
     vital_df = pd.read_pickle(VITAL_PKL)
     print(f"  shape: {vital_df.shape}")

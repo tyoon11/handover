@@ -9,11 +9,13 @@
 
 import sys, os, argparse
 
+
 def _early_parse():
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--gpus", type=str, default=None)
     args, _ = p.parse_known_args()
     return args.gpus
+
 
 _gpus = _early_parse()
 if _gpus is not None:
@@ -33,10 +35,20 @@ from peft import LoraConfig, get_peft_model, PeftModel
 from trl import DPOTrainer, DPOConfig
 
 from config import (
-    SELFJUDGE_PKL, VITAL_MAP_PKL, SFT_MODELS, SFT_OUT, RLAIF_OUT,
-    LORA_R, LORA_ALPHA, LORA_DROPOUT, LORA_TARGET_MODULES, LORA_TARGET_MODULES_GEMMA4,
-    RLAIF_CONFIG, SYSTEM_PROMPT, build_user_prompt,
-    EMR_PREOP_SUM_COL, EMR_PREMED_COL,
+    SYNTH_PKL,
+    VITAL_MAP_PKL,
+    SFT_MODELS,
+    RLAIF_OUT,
+    LORA_R,
+    LORA_ALPHA,
+    LORA_DROPOUT,
+    LORA_TARGET_MODULES,
+    LORA_TARGET_MODULES_GEMMA4,
+    RLAIF_CONFIG,
+    SYSTEM_PROMPT,
+    build_user_prompt,
+    EMR_PREOP_SUM_COL,
+    EMR_PREMED_COL,
 )
 
 
@@ -59,13 +71,16 @@ def _get(row, col):
 
 
 def _emr_text(row):
-    preop  = _get(row, EMR_PREOP_SUM_COL)
+    preop = _get(row, EMR_PREOP_SUM_COL)
     premed = _get(row, EMR_PREMED_COL)
-    anrec  = _get(row, ("마취기록", "기록", ""))
+    anrec = _get(row, ("마취기록", "기록", ""))
     parts = []
-    if preop:  parts.append(f"[마취전 환자상태 요약]\n{preop}")
-    if premed: parts.append(f"[수술전 준비사항 및 Premedication]\n{premed}")
-    if anrec:  parts.append(f"[마취기록]\n{anrec}")
+    if preop:
+        parts.append(f"[마취전 환자상태 요약]\n{preop}")
+    if premed:
+        parts.append(f"[수술전 준비사항 및 Premedication]\n{premed}")
+    if anrec:
+        parts.append(f"[마취기록]\n{anrec}")
     return "\n\n".join(parts)
 
 
@@ -77,7 +92,8 @@ def build_dpo_dataset(df, vital_map, tokenizer) -> Dataset:
     for _, row in df.iterrows():
         emr = _emr_text(row)
         try:
-            sid = int(row["수술 ID"])
+            v = row["수술 ID"]
+            sid = int(v.iloc[0]) if hasattr(v, "iloc") else int(v)
         except Exception:
             sid = -1
         vital = vital_map.get(sid, "")
@@ -88,18 +104,21 @@ def build_dpo_dataset(df, vital_map, tokenizer) -> Dataset:
         sys_msg = [{"role": "system", "content": SYSTEM_PROMPT}]
         prompt_str = tokenizer.apply_chat_template(
             sys_msg + [{"role": "user", "content": user}],
-            tokenize=False, add_generation_prompt=True,
+            tokenize=False,
+            add_generation_prompt=True,
         )
         prompts.append(prompt_str)
-        chosens.append(str(row.get("chosen",   "")))
+        chosens.append(str(row.get("chosen", "")))
         rejecteds.append(str(row.get("rejected", "")))
 
     print(f"  DPO 샘플: {len(prompts)}건  (vital 없음: {no_vital}건)")
-    return Dataset.from_dict({
-        "prompt":   prompts,
-        "chosen":   chosens,
-        "rejected": rejecteds,
-    })
+    return Dataset.from_dict(
+        {
+            "prompt": prompts,
+            "chosen": chosens,
+            "rejected": rejecteds,
+        }
+    )
 
 
 def train(args):
@@ -122,7 +141,7 @@ def train(args):
     print(f"  GPU:    {n_gpu}개")
 
     # 데이터
-    df = pd.read_pickle(SELFJUDGE_PKL)
+    df = pd.read_pickle(SYNTH_PKL)
     with open(VITAL_MAP_PKL, "rb") as f:
         vital_map = pickle.load(f)
     print(f"  데이터: {len(df)}건")
@@ -131,7 +150,7 @@ def train(args):
     tokenizer = AutoTokenizer.from_pretrained(base_model_id, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "left"   # DPO는 left padding
+    tokenizer.padding_side = "left"  # DPO는 left padding
 
     # 모델
     print("모델 로드 중...")
@@ -145,11 +164,16 @@ def train(args):
 
     # LoRA (SFT 체크포인트면 이미 PEFT 모델일 수 있음)
     if not args.sft_ckpt:
-        _lora_targets = LORA_TARGET_MODULES_GEMMA4 if args.base == "gemma4" else LORA_TARGET_MODULES
+        _lora_targets = (
+            LORA_TARGET_MODULES_GEMMA4 if args.base == "gemma4" else LORA_TARGET_MODULES
+        )
         lora_cfg = LoraConfig(
-            r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT,
+            r=LORA_R,
+            lora_alpha=LORA_ALPHA,
+            lora_dropout=LORA_DROPOUT,
             target_modules=_lora_targets,
-            bias="none", task_type="CAUSAL_LM",
+            bias="none",
+            task_type="CAUSAL_LM",
         )
         model = get_peft_model(model, lora_cfg)
         model.print_trainable_parameters()
@@ -166,13 +190,22 @@ def train(args):
         seed=42,
         report_to="none",
         gradient_checkpointing=True,
-        **{k: v for k, v in cfg.items() if k not in ("loss_type", "num_train_epochs",
-                                                "save_strategy", "dataloader_num_workers")},
+        **{
+            k: v
+            for k, v in cfg.items()
+            if k
+            not in (
+                "loss_type",
+                "num_train_epochs",
+                "save_strategy",
+                "dataloader_num_workers",
+            )
+        },
     )
 
     trainer = DPOTrainer(
         model=model,
-        ref_model=None,   # SimPO/온라인 DPO는 ref_model 없이도 동작
+        ref_model=None,  # SimPO/온라인 DPO는 ref_model 없이도 동작
         args=dpo_config,
         train_dataset=dataset,
         processing_class=tokenizer,
@@ -187,10 +220,17 @@ def train(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Self-Judge RLAIF (DPO/SimPO)")
-    parser.add_argument("--base",      choices=["llama", "qwen", "gemma4", "qwen35", "hari"], default="llama")
-    parser.add_argument("--loss",      choices=["dpo", "simpo"],  default="dpo")
-    parser.add_argument("--sft_ckpt",  type=str, default=None,
-                        help="SFT 완료 체크포인트 경로 (없으면 raw 모델 사용)")
-    parser.add_argument("--gpus",      type=str, default=None,
-                        help="사용할 GPU 번호. 예: '0' 또는 '0,1,2,3'")
+    parser.add_argument(
+        "--base", choices=["llama", "qwen", "gemma4", "qwen35", "hari"], default="llama"
+    )
+    parser.add_argument("--loss", choices=["dpo", "simpo"], default="dpo")
+    parser.add_argument(
+        "--sft_ckpt",
+        type=str,
+        default=None,
+        help="SFT 완료 체크포인트 경로 (없으면 raw 모델 사용)",
+    )
+    parser.add_argument(
+        "--gpus", type=str, default=None, help="사용할 GPU 번호. 예: '0' 또는 '0,1,2,3'"
+    )
     train(parser.parse_args())
