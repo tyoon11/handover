@@ -26,7 +26,7 @@ RLHF_PKL = DATA_DIR / "preprocessed/rlhf_251008.pkl"  # 150×228
 SYNTH_PKL = DATA_DIR / "synthetic/jsft_score_251213.pkl"  # 2736×249, chosen/rejected
 
 # ── Vital summarizer 출력 경로 ────────────────────────────────────────────
-VITAL_MAP_PKL = WORK_DIR / "vital_summary_map.pkl"  # {수술ID: vital_summary_str}
+VITAL_MAP_PKL = DATA_DIR / "vital_summary_map.pkl"  # {수술ID: vital_summary_str}
 
 # ── EMR MultiIndex 컬럼 접근 ──────────────────────────────────────────────
 # df는 3레벨 MultiIndex. 주요 컬럼 튜플 키:
@@ -135,9 +135,9 @@ LORA_TARGET_MODULES_GEMMA4 = r"model\.language_model\.layers\.\d+\.(self_attn\.(
 SFT_CONFIG = dict(
     num_train_epochs=3,
     per_device_train_batch_size=2,
-    gradient_accumulation_steps=4,
-    learning_rate=2e-5,
-    warmup_ratio=0.05,
+    gradient_accumulation_steps=16,  # 원본 train_jsft.ipynb 기준
+    learning_rate=1e-6,              # 원본 train_jsft.ipynb 기준
+    warmup_ratio=0.1,                # 원본 train_jsft.ipynb 기준
     lr_scheduler_type="cosine",
     bf16=True,
     logging_steps=10,

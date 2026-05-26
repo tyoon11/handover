@@ -19,7 +19,22 @@ from transformers.trainer_callback import TrainerCallback
 from transformers.trainer_utils import EvalLoopOutput
 from transformers.utils import is_torch_fx_proxy
 
-from trl.import_utils import is_peft_available, is_wandb_available
+try:
+    from trl.import_utils import is_peft_available, is_wandb_available
+except ImportError:
+    def is_peft_available():
+        try:
+            import peft  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+    def is_wandb_available():
+        try:
+            import wandb  # noqa: F401
+            return True
+        except ImportError:
+            return False
 from simpo_config import SimPOConfig
 
 from dataclasses import dataclass
@@ -27,12 +42,67 @@ from typing import Dict, Literal, Optional
 
 from transformers import TrainingArguments
 
-from trl.trainer.utils import (
-    DPODataCollatorWithPadding,
-    disable_dropout_in_model,
-    pad_to_length,
-    peft_module_casting_to_bf16,
-)
+# ── TRL 버전별 유틸리티 호환성 폴백 ─────────────────────────────────────────
+
+try:
+    from trl.trainer.utils import pad_to_length
+except ImportError:
+    def pad_to_length(tensor: torch.Tensor, length: int, pad_value: Union[int, float], dim: int = -1) -> torch.Tensor:
+        if tensor.size(dim) >= length:
+            return tensor
+        pad_size = list(tensor.shape)
+        pad_size[dim] = length - tensor.size(dim)
+        return torch.cat(
+            [tensor, pad_value * torch.ones(*pad_size, dtype=tensor.dtype, device=tensor.device)],
+            dim=dim,
+        )
+
+try:
+    from trl.trainer.utils import disable_dropout_in_model
+except ImportError:
+    def disable_dropout_in_model(model: torch.nn.Module) -> None:
+        for module in model.modules():
+            if isinstance(module, torch.nn.Dropout):
+                module.p = 0.0
+
+try:
+    from trl.trainer.utils import peft_module_casting_to_bf16
+except ImportError:
+    def peft_module_casting_to_bf16(model: torch.nn.Module) -> None:
+        for name, module in model.named_modules():
+            if any(hasattr(module, attr) for attr in ("lora_A", "lora_B")):
+                module.to(torch.bfloat16)
+            elif isinstance(module, torch.nn.LayerNorm) or "norm" in name:
+                module.to(torch.float32)
+
+try:
+    from trl.trainer.utils import DPODataCollatorWithPadding
+except ImportError:
+    @dataclass
+    class DPODataCollatorWithPadding:
+        pad_token_id: int = 0
+        label_pad_token_id: int = -100
+        is_encoder_decoder: bool = False
+
+        def __call__(self, features: List[Dict]) -> Dict[str, torch.Tensor]:
+            padded = {}
+            for key in features[0]:
+                vals = [f[key] for f in features]
+                if not isinstance(vals[0], (list, torch.Tensor)):
+                    padded[key] = vals
+                    continue
+                seqs = [torch.LongTensor(v) if isinstance(v, list) else v for v in vals]
+                if "label" in key:
+                    pad_val = self.label_pad_token_id
+                elif "attention_mask" in key:
+                    pad_val = 0
+                else:
+                    pad_val = self.pad_token_id
+                max_len = max(s.size(0) for s in seqs)
+                padded[key] = torch.stack(
+                    [F.pad(s, (0, max_len - s.size(0)), value=pad_val) for s in seqs]
+                )
+            return padded
 
 try:
     from trl.trainer.utils import trl_sanitze_kwargs_for_tagging

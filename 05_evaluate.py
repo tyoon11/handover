@@ -139,7 +139,7 @@ def load_judge_model(model_id: str):
 def judge_score(
     model, tokenizer, instruction: str, response: str, rubric: str
 ) -> float:
-    """Prometheus 스타일 scoring → 1~5점. 원본 ABSOLUTE_PROMPT_WO_REF + system_prompt7 사용."""
+    """Absolute scoring → 1~5점. 텍스트 [RESULT] N 파싱 방식 (단독 평가 시)."""
     content = _ABSOLUTE_PROMPT.format(
         instruction=instruction,
         response=response,
@@ -149,14 +149,11 @@ def judge_score(
         {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
         {"role": "user", "content": content},
     ]
-    # Prometheus는 mistral 기반 → apply_chat_template 없이 직접 포맷
-    # HF 모델로 로드한 경우 tokenizer의 chat_template 사용
     if hasattr(tokenizer, "chat_template") and tokenizer.chat_template:
         prompt = tokenizer.apply_chat_template(
             msgs, tokenize=False, add_generation_prompt=True
         )
     else:
-        # fallback: [INST] ... [/INST] mistral 포맷
         prompt = f"[INST] {JUDGE_SYSTEM_PROMPT}\n\n{content} [/INST]"
 
     inputs = tokenizer(
@@ -180,10 +177,165 @@ def judge_score(
     return float(nums[-1]) if nums else 3.0
 
 
+_AB_TOKEN_IDS: dict = {}
+
+
+def _get_ab_token_ids(tokenizer) -> tuple:
+    """' A', ' B' 토큰 ID 캐싱 (모델별로 다름)."""
+    key = id(tokenizer)
+    if key not in _AB_TOKEN_IDS:
+        _AB_TOKEN_IDS[key] = (
+            tokenizer.encode(" A", add_special_tokens=False)[-1],
+            tokenizer.encode(" B", add_special_tokens=False)[-1],
+        )
+    return _AB_TOKEN_IDS[key]
+
+
+def judge_score_ab(
+    model, tokenizer, instruction: str, resp_a: str, resp_b: str, rubric: str
+) -> float:
+    """Pairwise A/B logprob scoring → P(A) / (P(A)+P(B)).
+
+    원본 evaluation.ipynb 방식: 두 응답을 비교하여 다음 토큰의 logprob으로 소프트 스코어 반환.
+    위치 편향 제거를 위해 A/B 순서를 반전한 두 번의 평가 평균을 호출 측에서 처리.
+    """
+    tok_a, tok_b = _get_ab_token_ids(tokenizer)
+
+    content = (
+        f"###Score Rubric:\n{rubric}\n\n"
+        f"###Instruction:\n{instruction}\n\n"
+        f"###Response A:\n{resp_a}\n\n"
+        f"###Response B:\n{resp_b}\n\n"
+        "###Question: Which response better follows the rubric?\n\n"
+        "###Answer: Response"
+    )
+    msgs = [
+        {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+        {"role": "user", "content": content},
+    ]
+    if hasattr(tokenizer, "chat_template") and tokenizer.chat_template:
+        prompt = tokenizer.apply_chat_template(
+            msgs, tokenize=False, add_generation_prompt=True
+        )
+    else:
+        prompt = f"[INST] {JUDGE_SYSTEM_PROMPT}\n\n{content} [/INST]"
+
+    inputs = tokenizer(
+        prompt, return_tensors="pt", truncation=True, max_length=3500
+    ).to(model.device)
+    with torch.no_grad():
+        logits = model(**inputs).logits[0, -1]
+
+    log_probs = torch.log_softmax(logits, dim=-1)
+    p_a = log_probs[tok_a].exp().item()
+    p_b = log_probs[tok_b].exp().item()
+    denom = p_a + p_b
+    return p_a / denom if denom > 1e-10 else 0.5
+
+
 # ── 메인 ────────────────────────────────────────────────────────────────
 
 
+def evaluate_pairwise(args):
+    """A/B logprob 쌍 비교 평가 (원본 evaluation.ipynb 방식).
+
+    result_file (모델 A)과 result_file_b (모델 B)를 케이스별로 매칭하여
+    Brevity + Critical 각 루브릭에서 P(A) / (P(A)+P(B)) 소프트 스코어를 산출.
+    위치 편향 제거를 위해 A→B 순과 B→A 순을 모두 평가한 후 평균.
+    """
+    file_a = Path(args.result_file)
+    file_b = Path(args.result_file_b)
+
+    tag = args.out_tag if args.out_tag else f"{file_a.parent.name}_vs_{file_b.parent.name}"
+    out_dir = EVAL_OUT / tag
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_a = out_dir / file_a.name.replace(".jsonl", "_A_scores.jsonl")
+    out_b = out_dir / file_b.name.replace(".jsonl", "_B_scores.jsonl")
+
+    print(f"\n[Pairwise Evaluate]")
+    print(f"  Model A: {file_a}")
+    print(f"  Model B: {file_b}")
+
+    with open(file_a, encoding="utf-8") as f:
+        recs_a = [json.loads(l) for l in f]
+    with open(file_b, encoding="utf-8") as f:
+        recs_b = [json.loads(l) for l in f]
+
+    assert len(recs_a) == len(recs_b), "두 파일의 케이스 수가 다릅니다."
+
+    gold_df = pd.read_pickle(GOLD_PKL)
+    with open(VITAL_MAP_PKL, "rb") as f:
+        vital_map = pickle.load(f)
+
+    judge_model, judge_tok = load_judge_model(args.judge_model or EVAL_JUDGE_MODEL)
+
+    scored_a, scored_b = [], []
+    with open(out_a, "w", encoding="utf-8") as fa, open(out_b, "w", encoding="utf-8") as fb:
+        for rec_a, rec_b in tqdm(zip(recs_a, recs_b), total=len(recs_a)):
+            idx = rec_a["idx"]
+            sid = rec_a.get("sid", -1)
+            gen_a = clean_output(rec_a.get("generated", ""))
+            gen_b = clean_output(rec_b.get("generated", ""))
+
+            row = gold_df.iloc[idx] if idx < len(gold_df) else None
+            emr = build_emr_text(row) if row is not None else ""
+            vital = vital_map.get(sid, "")
+            instruction = build_user_prompt(emr, vital)
+
+            scores_a_brevity, scores_b_brevity = [], []
+            scores_a_critical, scores_b_critical = [], []
+            for rubric, sa_list, sb_list in [
+                (BREVITY_RUBRIC, scores_a_brevity, scores_b_brevity),
+                (CRITICAL_RUBRIC, scores_a_critical, scores_b_critical),
+            ]:
+                # 순서 1: A vs B → P(A wins)
+                p_a = judge_score_ab(judge_model, judge_tok, instruction, gen_a, gen_b, rubric)
+                # 순서 2: B vs A → P(B wins) = 1 - P(A wins in reverse)
+                p_b_rev = judge_score_ab(judge_model, judge_tok, instruction, gen_b, gen_a, rubric)
+                # 위치 편향 제거: P(A) = 평균(순서1 P(A), 1 - 순서2 P(B as A))
+                sa = (p_a + (1.0 - p_b_rev)) / 2.0
+                sb = 1.0 - sa
+                sa_list.append(sa)
+                sb_list.append(sb)
+
+            # 1~5 스케일 변환: soft_score * 4 + 1
+            def to_scale(p):
+                return p * 4.0 + 1.0
+
+            ra = {
+                **rec_a,
+                "brevity_score": to_scale(scores_a_brevity[0]),
+                "critical_score": to_scale(scores_a_critical[0]),
+                "sum_score": to_scale(scores_a_brevity[0]) + to_scale(scores_a_critical[0]),
+                "brevity_soft": scores_a_brevity[0],
+                "critical_soft": scores_a_critical[0],
+            }
+            rb = {
+                **rec_b,
+                "brevity_score": to_scale(scores_b_brevity[0]),
+                "critical_score": to_scale(scores_b_critical[0]),
+                "sum_score": to_scale(scores_b_brevity[0]) + to_scale(scores_b_critical[0]),
+                "brevity_soft": scores_b_brevity[0],
+                "critical_soft": scores_b_critical[0],
+            }
+            fa.write(json.dumps(ra, ensure_ascii=False) + "\n")
+            fb.write(json.dumps(rb, ensure_ascii=False) + "\n")
+            scored_a.append(ra)
+            scored_b.append(rb)
+
+    for label, scored, out_file in [("A", scored_a, out_a), ("B", scored_b, out_b)]:
+        df = pd.DataFrame(scored)
+        print(f"\n[Model {label}] Brevity: {df['brevity_score'].mean():.3f}  "
+              f"Critical: {df['critical_score'].mean():.3f}  "
+              f"SUM: {df['sum_score'].mean():.3f}")
+        print(f"  저장: {out_file}")
+
+
 def evaluate(args):
+    if args.result_file_b:
+        evaluate_pairwise(args)
+        return
+
     result_file = Path(args.result_file)
     tag = args.out_tag if args.out_tag else result_file.parent.name
     out_dir = EVAL_OUT / tag
@@ -417,7 +569,13 @@ if __name__ == "__main__":
         "--result_file",
         type=str,
         default=None,
-        help="04_inference.py 출력 jsonl 파일 경로",
+        help="04_inference.py 출력 jsonl 파일 경로 (모델 A)",
+    )
+    parser.add_argument(
+        "--result_file_b",
+        type=str,
+        default=None,
+        help="쌍 비교 시 모델 B의 jsonl 경로. 지정 시 A/B logprob 방식으로 평가.",
     )
     parser.add_argument(
         "--judge_model",
