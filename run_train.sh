@@ -39,9 +39,9 @@ echo "========================================================"
 run_job() {
     # run_job <label> <log_file> <cmd...>
     local label="$1"; local logfile="$2"; shift 2
-    echo "[START] ${label}"
+    echo "[START] ${label}" >&2   # stderr로 출력 → PID 캡처에 섞이지 않음
     "$@" > "$logfile" 2>&1 &
-    echo $!   # 반환값: PID
+    echo $!   # stdout에는 PID만
 }
 
 wait_jobs() {
