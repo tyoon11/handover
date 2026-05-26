@@ -6,9 +6,9 @@ config.py — 전체 파이프라인 설정
 from pathlib import Path
 
 # ── 기본 경로 ──────────────────────────────────────────────────────────────
-BASE_DIR = Path("/home/coder/workspace/data/HANDOVER_인계용_다린")
+BASE_DIR = Path("/home/coder/workspace/data/handover")
 DATA_DIR = BASE_DIR / "data"
-WORK_DIR = Path("/home/coder/workspace/data/handover/0511/handover")
+WORK_DIR = Path("/home/coder/workspace/data/handover/0526/handover")
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── EMR / Vital 원본 pkl ───────────────────────────────────────────────────

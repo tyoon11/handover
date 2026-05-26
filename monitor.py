@@ -13,7 +13,7 @@ import glob
 from pathlib import Path
 from datetime import datetime
 
-WORK_DIR = Path("/home/coder/workspace/data/handover/0511/handover")
+WORK_DIR = Path("/home/coder/workspace/data/handover/0526/handover")
 
 # 오늘 날짜 기준 로그 폴더 찾기
 today = datetime.now().strftime("%m%d")
