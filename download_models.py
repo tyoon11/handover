@@ -10,7 +10,7 @@ download_models.py — 실험에 필요한 HuggingFace 모델 다운로드
   - google/medgemma-27b-it
   - Qwen/Qwen3.5-9B
   - snuh/hari-q3-8b
-  
+
   [평가]
   - prometheus-eval/prometheus-7b-v2.0
   - google/flan-t5-large
@@ -34,72 +34,94 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 MODELS = {
     # 학습 베이스
     "llama": {
-        "repo_id":   "meta-llama/Llama-3.1-8B-Instruct",
+        "repo_id": "meta-llama/Llama-3.1-8B-Instruct",
         "local_dir": MODEL_DIR / "Llama-3.1-8B-Instruct",
-        "desc":      "학습 베이스 (SFT/RLAIF)",
-        "gated":     True,   # Meta 라이선스 동의 + HF 토큰 필요
+        "desc": "학습 베이스 (SFT/RLAIF)",
+        "gated": True,  # Meta 라이선스 동의 + HF 토큰 필요
     },
     "qwen": {
-        "repo_id":   "Qwen/Qwen3-8B",
+        "repo_id": "Qwen/Qwen3-8B",
         "local_dir": MODEL_DIR / "Qwen3-8B",
-        "desc":      "학습 베이스 (SFT/RLAIF)",
-        "gated":     False,
+        "desc": "학습 베이스 (SFT/RLAIF)",
+        "gated": False,
     },
     "gemma4": {
-        "repo_id":   "google/gemma-4-E4B-it",
+        "repo_id": "google/gemma-4-E4B-it",
         "local_dir": MODEL_DIR / "gemma-4-E4B-it",
-        "desc":      "비교 베이스 (Google Gemma 4 E4B)",
-        "gated":     True,   # Google 라이선스 동의 필요
+        "desc": "비교 베이스 (Google Gemma 4 E4B)",
+        "gated": True,  # Google 라이선스 동의 필요
     },
     "gemma4-31b": {
-        "repo_id":   "google/gemma-4-31B-it",
+        "repo_id": "google/gemma-4-31B-it",
         "local_dir": MODEL_DIR / "gemma-4-31B-it",
-        "desc":      "비교 베이스 (Google Gemma 4 31B)",
-        "gated":     True,   # Google 라이선스 동의 필요
+        "desc": "비교 베이스 (Google Gemma 4 31B)",
+        "gated": True,  # Google 라이선스 동의 필요
     },
     "qwen35": {
-        "repo_id":   "Qwen/Qwen3.5-9B",
+        "repo_id": "Qwen/Qwen3.5-9B",
         "local_dir": MODEL_DIR / "Qwen3.5-9B",
-        "desc":      "비교 베이스 (Qwen 3.5 9B)",
-        "gated":     False,
+        "desc": "비교 베이스 (Qwen 3.5 9B)",
+        "gated": False,
     },
     "hari": {
-        "repo_id":   "snuh/hari-q3-8b",
+        "repo_id": "snuh/hari-q3-8b",
         "local_dir": MODEL_DIR / "hari-q3-8b",
-        "desc":      "서울대병원 특화 모델",
-        "gated":     False,
+        "desc": "서울대병원 특화 모델",
+        "gated": False,
+    },
+    "mixtral-7b": {
+        "repo_id": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+        "local_dir": MODEL_DIR / "Mixtral-8x7B-Instruct-v0.1",
+        "desc": "비교 베이스 (Mixtral 8x7B Instruct)",
+        "gated": False,
+    },
+    "mixtral-22b": {
+        "repo_id": "mistralai/Mixtral-8x22B-Instruct-v0.1",
+        "local_dir": MODEL_DIR / "Mixtral-8x22B-Instruct-v0.1",
+        "desc": "비교 베이스 (Mixtral 8x22B Instruct)",
+        "gated": False,
     },
     "medgemma27b": {
-        "repo_id":   "google/medgemma-27b-it",
+        "repo_id": "google/medgemma-27b-it",
         "local_dir": MODEL_DIR / "medgemma-27b-it",
-        "desc":      "medgemma judge",
-        "gated":     True,
+        "desc": "medgemma judge",
+        "gated": True,
     },
-
     # 평가
-    "prometheus": {
-        "repo_id":   "prometheus-eval/prometheus-7b-v2.0",
+    "prometheus-7b": {
+        "repo_id": "prometheus-eval/prometheus-7b-v2.0",
         "local_dir": MODEL_DIR / "prometheus-7b-v2.0",
-        "desc":      "LLM-as-Judge 평가",
-        "gated":     False,
+        "desc": "LLM-as-Judge 평가",
+        "gated": False,
+    },
+    "prometheus-56b": {
+        "repo_id": "prometheus-eval/prometheus-8x7b-v2.0",
+        "local_dir": MODEL_DIR / "prometheus-8x7b-v2.0",
+        "desc": "LLM-as-Judge 평가",
+        "gated": False,
     },
     "flan-large": {
-        "repo_id":   "google/flan-t5-large",
+        "repo_id": "google/flan-t5-large",
         "local_dir": MODEL_DIR / "flan-t5-large",
-        "desc":      "SCALE factuality 평가 (large)",
-        "gated":     False,
+        "desc": "SCALE factuality 평가 (large)",
+        "gated": False,
     },
     "flan-xl": {
-        "repo_id":   "google/flan-t5-xl",
+        "repo_id": "google/flan-t5-xl",
         "local_dir": MODEL_DIR / "flan-t5-xl",
-        "desc":      "SCALE factuality 평가 (xl)",
-        "gated":     False,
+        "desc": "SCALE factuality 평가 (xl)",
+        "gated": False,
     },
 }
 
 IGNORE_PATTERNS = [
-    "*.msgpack", "*.h5", "flax_model*", "tf_model*",
-    "rust_model*", "coreml*", "onnx*",
+    "*.msgpack",
+    "*.h5",
+    "flax_model*",
+    "tf_model*",
+    "rust_model*",
+    "coreml*",
+    "onnx*",
 ]
 
 
@@ -108,8 +130,7 @@ def check_status(local_dir: Path):
         return False, "폴더 없음"
     if not (local_dir / "config.json").exists():
         return False, "config.json 없음"
-    weights = (list(local_dir.rglob("*.safetensors")) +
-               list(local_dir.rglob("*.bin")))
+    weights = list(local_dir.rglob("*.safetensors")) + list(local_dir.rglob("*.bin"))
     if not weights:
         return False, "weight 파일 없음"
     total_gb = sum(f.stat().st_size for f in weights) / 1e9
@@ -135,16 +156,21 @@ def _patch_httpx_ssl():
     """SSL 인증서 검증 우회 (self-signed certificate 환경 대응)"""
     try:
         import httpx
+
         _orig_init = httpx.Client.__init__
+
         def _patched_init(self, *a, **kw):
-            kw['verify'] = False
+            kw["verify"] = False
             _orig_init(self, *a, **kw)
+
         httpx.Client.__init__ = _patched_init
 
         _orig_async_init = httpx.AsyncClient.__init__
+
         def _patched_async_init(self, *a, **kw):
-            kw['verify'] = False
+            kw["verify"] = False
             _orig_async_init(self, *a, **kw)
+
         httpx.AsyncClient.__init__ = _patched_async_init
     except ImportError:
         pass
@@ -152,10 +178,11 @@ def _patch_httpx_ssl():
 
 def download_one(key: str, token, force: bool) -> bool:
     from huggingface_hub import snapshot_download
+
     _patch_httpx_ssl()
 
-    info      = MODELS[key]
-    repo_id   = info["repo_id"]
+    info = MODELS[key]
+    repo_id = info["repo_id"]
     local_dir = info["local_dir"]
 
     ok, detail = check_status(local_dir)
@@ -192,15 +219,23 @@ def download_one(key: str, token, force: bool) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(description="HuggingFace 모델 다운로드")
-    parser.add_argument("--models", nargs="+", choices=list(MODELS.keys()),
-                        default=list(MODELS.keys()),
-                        help=f"다운로드할 모델 키 (기본: 전체)\n선택지: {list(MODELS.keys())}")
-    parser.add_argument("--check",  action="store_true", help="상태 확인만")
-    parser.add_argument("--force",  action="store_true", help="이미 있어도 재다운로드")
-    parser.add_argument("--token",  type=str, default=None, help="HuggingFace 토큰")
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        choices=list(MODELS.keys()),
+        default=list(MODELS.keys()),
+        help=f"다운로드할 모델 키 (기본: 전체)\n선택지: {list(MODELS.keys())}",
+    )
+    parser.add_argument("--check", action="store_true", help="상태 확인만")
+    parser.add_argument("--force", action="store_true", help="이미 있어도 재다운로드")
+    parser.add_argument("--token", type=str, default=None, help="HuggingFace 토큰")
     args = parser.parse_args()
 
-    token = args.token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    token = (
+        args.token
+        or os.environ.get("HF_TOKEN")
+        or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    )
     if token:
         print(f"[인증] HF 토큰: {token[:8]}...")
     else:
@@ -221,7 +256,7 @@ def main():
 
     # 요약
     print("\n" + "=" * 50)
-    ok_list   = [k for k, v in results.items() if v]
+    ok_list = [k for k, v in results.items() if v]
     fail_list = [k for k, v in results.items() if not v]
     if ok_list:
         print(f"✓ 성공: {', '.join(ok_list)}")
@@ -229,7 +264,9 @@ def main():
         print(f"✗ 실패: {', '.join(fail_list)}")
         print()
         print("  팁:")
-        print("  - gated 모델(llama, gemma4, gemma4-31b): HF 라이선스 동의 후 --token <HF_TOKEN>")
+        print(
+            "  - gated 모델(llama, gemma4, gemma4-31b): HF 라이선스 동의 후 --token <HF_TOKEN>"
+        )
         sys.exit(1)
     print()
 

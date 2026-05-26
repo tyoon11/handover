@@ -57,48 +57,10 @@ from config import (
     SFT_CONFIG,
     SYSTEM_PROMPT,
     build_user_prompt,
-    EMR_PREOP_SUM_COL,
-    EMR_PREMED_COL,
+    build_emr_text,
 )
 
 MAX_SEQ_LEN = 2048
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# EMR 텍스트 추출
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-
-def _get(row, col) -> str:
-    try:
-        v = row[col]
-    except KeyError:
-        return ""
-    if v is None or (isinstance(v, float) and pd.isna(v)):
-        return ""
-    if isinstance(v, dict):
-        vals = []
-        for vlist in v.values():
-            if isinstance(vlist, list):
-                vals.extend([str(x) for x in vlist if x is not None])
-            else:
-                vals.append(str(vlist))
-        return " ".join(vals)
-    return str(v)
-
-
-def _emr_text(row) -> str:
-    preop = _get(row, EMR_PREOP_SUM_COL)
-    premed = _get(row, EMR_PREMED_COL)
-    anrec = _get(row, ("마취기록", "기록", ""))
-    parts = []
-    if preop:
-        parts.append(f"[마취전 환자상태 요약]\n{preop}")
-    if premed:
-        parts.append(f"[수술전 준비사항 및 Premedication]\n{premed}")
-    if anrec:
-        parts.append(f"[마취기록]\n{anrec}")
-    return "\n\n".join(parts)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -106,12 +68,21 @@ def _emr_text(row) -> str:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def _chat(system, user, assistant, tokenizer) -> str:
+def _chat(system, user, assistant, tokenizer, is_qwen: bool = False) -> str:
     msgs = [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
         {"role": "assistant", "content": assistant},
     ]
+    # 원본 train_jsft.ipynb와 동일: Qwen3는 학습 시 thinking 비활성화
+    # enable_thinking=False 없으면 <think>\n\n</think> 빈 블록이 학습 데이터에 삽입됨
+    if is_qwen:
+        try:
+            return tokenizer.apply_chat_template(
+                msgs, tokenize=False, enable_thinking=False
+            )
+        except TypeError:
+            pass  # 구버전 tokenizer → fallback
     return tokenizer.apply_chat_template(msgs, tokenize=False)
 
 
@@ -119,9 +90,11 @@ def build_dataset(synth_df, vital_map, tokenizer) -> Dataset:
     """1행 → 3샘플: generation + judge(A>B) + judge(B>A)"""
     texts = []
     no_vital = 0
+    # 원본과 동일: Qwen3 계열은 학습 시 thinking 비활성화
+    is_qwen = "qwen" in str(getattr(tokenizer, "name_or_path", "")).lower()
 
     for _, row in synth_df.iterrows():
-        emr = _emr_text(row)
+        emr = build_emr_text(row)
         try:
             v = row["수술 ID"]
             sid = int(v.iloc[0]) if hasattr(v, "iloc") else int(v)
@@ -136,21 +109,23 @@ def build_dataset(synth_df, vital_map, tokenizer) -> Dataset:
         rejected = str(row.get("rejected", ""))
 
         # (1) generation
-        texts.append(_chat(SYSTEM_PROMPT, user_base, chosen, tokenizer))
+        texts.append(_chat(SYSTEM_PROMPT, user_base, chosen, tokenizer, is_qwen))
 
         # (2) judge A=chosen
         judge_user = (
             "Evaluate which of the following PACU/ICU handoffs is better. No reasoning.\n\n"
             f"EMR:\n{user_base}\n\nAssistant A: {chosen}\n\nAssistant B: {rejected}"
         )
-        texts.append(_chat(SYSTEM_PROMPT, judge_user, "Winner:\nA", tokenizer))
+        texts.append(_chat(SYSTEM_PROMPT, judge_user, "Winner:\nA", tokenizer, is_qwen))
 
         # (3) judge B=chosen
         judge_user2 = (
             "Evaluate which of the following PACU/ICU handoffs is better. No reasoning.\n\n"
             f"EMR:\n{user_base}\n\nAssistant A: {rejected}\n\nAssistant B: {chosen}"
         )
-        texts.append(_chat(SYSTEM_PROMPT, judge_user2, "Winner:\nB", tokenizer))
+        texts.append(
+            _chat(SYSTEM_PROMPT, judge_user2, "Winner:\nB", tokenizer, is_qwen)
+        )
 
     print(f"  총 샘플: {len(texts)}개  (vital 없는 케이스: {no_vital}건)")
     return Dataset.from_dict({"text": texts})

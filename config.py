@@ -116,9 +116,9 @@ EVAL_OUT = OUTPUT_BASE / "evaluation"
 SAMPLE_OUT = OUTPUT_BASE / "samples"
 
 # ── LoRA 하이퍼파라미터 ───────────────────────────────────────────────────
-LORA_R = 16
-LORA_ALPHA = 32
-LORA_DROPOUT = 0.05
+LORA_R = 8
+LORA_ALPHA = 16
+LORA_DROPOUT = 0.1
 LORA_TARGET_MODULES = [
     "q_proj",
     "k_proj",
@@ -135,8 +135,8 @@ LORA_TARGET_MODULES_GEMMA4 = r"model\.language_model\.layers\.\d+\.(self_attn\.(
 SFT_CONFIG = dict(
     num_train_epochs=3,
     per_device_train_batch_size=2,
-    gradient_accumulation_steps=8,
-    learning_rate=2e-4,
+    gradient_accumulation_steps=4,
+    learning_rate=2e-5,
     warmup_ratio=0.05,
     lr_scheduler_type="cosine",
     bf16=True,
@@ -148,10 +148,10 @@ SFT_CONFIG = dict(
 # ── RLAIF (DPO/SimPO) 설정 ────────────────────────────────────────────────
 RLAIF_CONFIG = dict(
     loss_type="sigmoid",  # "dpo" or "simpo"
-    num_train_epochs=1,
-    per_device_train_batch_size=1,
-    gradient_accumulation_steps=16,
-    learning_rate=5e-5,
+    num_train_epochs=3,
+    per_device_train_batch_size=2,
+    gradient_accumulation_steps=4,
+    learning_rate=5e-6,
     beta=0.1,
     max_length=2048,
     bf16=True,
@@ -162,22 +162,124 @@ RLAIF_CONFIG = dict(
 # ── 추론 설정 ─────────────────────────────────────────────────────────────
 # do_sample=False일 때 temperature/top_p 제거 (경고 방지)
 INFER_CONFIG = dict(
-    max_new_tokens=2048,
+    max_new_tokens=768,
     do_sample=False,
     batch_size=4,
 )
 
+# thinking 모델(Qwen3 등) 전용 설정:
+#   - thinking=True면 <think>...</think> 블록이 수백~수천 토큰을 소비하므로
+#     max_new_tokens를 충분히 크게 잡아야 실제 답변이 잘리지 않는다.
+#   - 원본 학습은 모두 enable_thinking=False로 진행됐으므로,
+#     기본 inference도 enable_thinking=False (INFER_THINKING=False)를 권장.
+#   - thinking을 켜고 싶을 때만 --thinking 플래그 사용.
+INFER_CONFIG_THINKING = dict(
+    max_new_tokens=8192,  # think 블록 ~2000 + 실제 답변 ~768 여유
+    do_sample=False,
+    batch_size=1,  # thinking 모드는 메모리 소모가 크므로 batch=1
+)
+
+# 기본값: 학습과 동일하게 thinking 비활성화 (원본 노트북과 동일)
+INFER_ENABLE_THINKING = False
+
 # ── 평가 설정 ─────────────────────────────────────────────────────────────
 EVAL_JUDGE_MODEL = "/home/coder/workspace/data/local_models/prometheus-8x7b-v2.0"
 
+# ── EMR 유틸 함수 ─────────────────────────────────────────────────────────
+import pandas as _pd
+
+
+def _safe_get(row, col):
+    """MultiIndex Series에서 컬럼 값을 안전하게 추출 (dict/NaN 처리 포함)."""
+    try:
+        v = row[col]
+    except KeyError:
+        return ""
+    if v is None or (isinstance(v, float) and _pd.isna(v)):
+        return ""
+    if isinstance(v, dict):
+        vals = []
+        for vlist in v.values():
+            if isinstance(vlist, list):
+                vals.extend([str(x) for x in vlist if x is not None])
+            else:
+                vals.append(str(vlist))
+        return " ".join(vals)
+    return str(v)
+
+
+def build_emr_text(row) -> str:
+    """
+    원본 emr_input_format() 재현: Pre-anesthetic Summary + Premedication + TOTALS + Record.
+    row : df.iterrows() 또는 df.iloc[idx] 에서 나온 MultiIndex Series.
+    """
+    preop = _safe_get(row, EMR_PREOP_SUM_COL)
+    premed = _safe_get(row, EMR_PREMED_COL)
+    anrec = _safe_get(row, ("마취기록", "기록", ""))
+
+    # TOTALS — ("마취기록", "마취기록TOTALS", item_name) 컬럼 전체 수집
+    totals_lines = []
+    for k, v in row.items():
+        if (
+            isinstance(k, tuple)
+            and len(k) >= 2
+            and k[0] == "마취기록"
+            and k[1] == "마취기록TOTALS"
+            and v is not None
+            and not (isinstance(v, float) and _pd.isna(v))
+        ):
+            label = k[2] if len(k) > 2 else str(k)
+            totals_lines.append(f"{label}: {v}")
+    totals_str = "\n".join(totals_lines)
+
+    parts = [
+        f"- Pre-anesthetic Patient Conditions Summary\n{preop}",
+        f"- Preoperative Preparations and Premedication\n{premed}",
+    ]
+    if totals_str:
+        parts.append(f"- Anesthetic TOTALS\n{totals_str}")
+    parts.append(f"- Anesthetic Record\n{anrec}")
+
+    return "\n\n".join(parts)
+
+
 # ── 프롬프트 ──────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are an anesthesiologist assistant generating structured Korean handoff summaries for pediatric surgery patients.
-Generate a concise, clinically accurate handoff summary based on the provided anesthesia EMR data.
-Write in Korean. Focus on key clinical information relevant to the receiving care team."""
+# 원본 train_jsft.ipynb / inference_llms.ipynb 와 동일한 system prompt
+SYSTEM_PROMPT = """You are an anesthesiologist giving an ultra-brief OR to PACU/ICU handoff AFTER surgery has fully ended.
+Do NOT ask for or suggest any intraoperative checks; only summarize key post-op relevant findings from the EMR.
+
+RULES:
+- If no clinically meaningful abnormal findings, output EXACTLY and ONLY "특이사항 없음".
+- If any exist, output 1-5 VERY short sentences in formal Korean.
+- NEVER include normal/stable findings, routine vitals, surgery steps, administrative drug info, or transfer phrases.
+- NO lists, NO explanations, NO repetition.
+
+Focus only on abnormal findings relevant after surgery: airway/respiratory status, hemodynamics/bleeding/transfusion,
+major or congenital disease, intra-op events already recorded, drug effects, essential lines/devices,
+and cooperation/agitation risk. Pediatric airway, fluids, and drug sensitivity are especially important."""
 
 
 def build_user_prompt(emr_text: str, vital_summary: str = "") -> str:
+    """
+    원본 user_prompt 포맷 유지 + 바이탈 요약 섹션 추가 (신규 multimodal 파이프라인).
+    vital_summary가 있을 때만 ### INTRAOPERATIVE VITAL SUMMARY 섹션 삽입.
+    """
     vital_section = (
-        f"\n\n[수술 중 바이탈 요약]\n{vital_summary}" if vital_summary else ""
+        f"\n\n### INTRAOPERATIVE VITAL SUMMARY\n{vital_summary}"
+        if vital_summary
+        else ""
     )
-    return f"[마취 EMR 데이터]{vital_section}\n\n{emr_text}\n\n위 데이터를 바탕으로 소아수술 인계요약지를 작성하세요."
+    return f"""Using the EMR below, generate an ultra-brief PACU/ICU handoff.
+
+- If there are NO clinically meaningful issues, output exactly and only "특이사항 없음".
+- If there ARE issues, output 1-5 very short sentences in formal Korean.
+- Do NOT include normal findings, routine or administrative details, or any request to re-check intraoperative events.
+
+Focus only on post-op relevant abnormalities: airway/respiratory status, hemodynamics/bleeding/transfusion,
+major or congenital disease, intra-op events already recorded, drug effects, lines/devices, and cooperation/agitation risk.
+
+### EMR
+{emr_text}{vital_section}
+
+### OUTPUT
+"""

@@ -27,6 +27,7 @@ else:
     print("[GPU] CUDA_VISIBLE_DEVICES 미지정 → 전체 GPU 사용")
 
 import pickle
+from pathlib import Path
 import pandas as pd
 import torch
 from datasets import Dataset
@@ -47,50 +48,19 @@ from config import (
     RLAIF_CONFIG,
     SYSTEM_PROMPT,
     build_user_prompt,
-    EMR_PREOP_SUM_COL,
-    EMR_PREMED_COL,
+    build_emr_text,
 )
-
-
-def _get(row, col):
-    try:
-        v = row[col]
-    except KeyError:
-        return ""
-    if v is None or (isinstance(v, float) and pd.isna(v)):
-        return ""
-    if isinstance(v, dict):
-        vals = []
-        for vlist in v.values():
-            if isinstance(vlist, list):
-                vals.extend([str(x) for x in vlist if x is not None])
-            else:
-                vals.append(str(vlist))
-        return " ".join(vals)
-    return str(v)
-
-
-def _emr_text(row):
-    preop = _get(row, EMR_PREOP_SUM_COL)
-    premed = _get(row, EMR_PREMED_COL)
-    anrec = _get(row, ("마취기록", "기록", ""))
-    parts = []
-    if preop:
-        parts.append(f"[마취전 환자상태 요약]\n{preop}")
-    if premed:
-        parts.append(f"[수술전 준비사항 및 Premedication]\n{premed}")
-    if anrec:
-        parts.append(f"[마취기록]\n{anrec}")
-    return "\n\n".join(parts)
 
 
 def build_dpo_dataset(df, vital_map, tokenizer) -> Dataset:
     """chosen / rejected 쌍 → DPO dataset."""
     prompts, chosens, rejecteds = [], [], []
     no_vital = 0
+    # 원본과 동일: Qwen3 계열은 학습 시 thinking 비활성화
+    is_qwen = "qwen" in str(getattr(tokenizer, "name_or_path", "")).lower()
 
     for _, row in df.iterrows():
-        emr = _emr_text(row)
+        emr = build_emr_text(row)
         try:
             v = row["수술 ID"]
             sid = int(v.iloc[0]) if hasattr(v, "iloc") else int(v)
@@ -102,11 +72,26 @@ def build_dpo_dataset(df, vital_map, tokenizer) -> Dataset:
 
         user = build_user_prompt(emr, vital)
         sys_msg = [{"role": "system", "content": SYSTEM_PROMPT}]
-        prompt_str = tokenizer.apply_chat_template(
-            sys_msg + [{"role": "user", "content": user}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+        user_msg = [{"role": "user", "content": user}]
+
+        # Qwen3: enable_thinking=False (원본 train_self_judge.ipynb와 동일)
+        if is_qwen:
+            try:
+                prompt_str = tokenizer.apply_chat_template(
+                    sys_msg + user_msg,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                )
+            except TypeError:
+                prompt_str = tokenizer.apply_chat_template(
+                    sys_msg + user_msg, tokenize=False, add_generation_prompt=True
+                )
+        else:
+            prompt_str = tokenizer.apply_chat_template(
+                sys_msg + user_msg, tokenize=False, add_generation_prompt=True
+            )
+
         prompts.append(prompt_str)
         chosens.append(str(row.get("chosen", "")))
         rejecteds.append(str(row.get("rejected", "")))
@@ -122,20 +107,21 @@ def build_dpo_dataset(df, vital_map, tokenizer) -> Dataset:
 
 
 def train(args):
-    # 기본 모델 or SFT 체크포인트
-    if args.sft_ckpt:
-        base_model_id = args.sft_ckpt
-        print(f"[RLAIF] SFT 체크포인트에서 시작: {base_model_id}")
-    else:
-        base_model_id = str(SFT_MODELS[args.base])
-        print(f"[RLAIF] Raw 모델에서 시작: {base_model_id}")
+    raw_model_id = str(SFT_MODELS[args.base])
 
-    output_dir = RLAIF_OUT / f"{args.base}_{args.loss}"
+    # 출력 경로 결정
     if args.sft_ckpt:
-        output_dir = RLAIF_OUT / f"{args.base}_sft_{args.loss}"
+        # sft_epochs 정보를 폴더명에 포함 (예: llama_sft1ep_dpo)
+        ep_tag = Path(args.sft_ckpt).parent.name  # e.g. "llama_1ep"
+        ep_num = ep_tag.split("_")[-1] if "_" in ep_tag else "sft"
+        output_dir = RLAIF_OUT / f"{args.base}_sft{ep_num}_{args.loss}"
+    else:
+        output_dir = RLAIF_OUT / f"{args.base}_raw_{args.loss}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     n_gpu = torch.cuda.device_count()
+    print(f"\n[RLAIF 시작]")
+    print(f"  Base:   {args.base}  ({raw_model_id})")
     print(f"  Loss:   {args.loss}")
     print(f"  출력:   {output_dir}")
     print(f"  GPU:    {n_gpu}개")
@@ -146,70 +132,113 @@ def train(args):
         vital_map = pickle.load(f)
     print(f"  데이터: {len(df)}건")
 
-    # 토크나이저
-    tokenizer = AutoTokenizer.from_pretrained(base_model_id, trust_remote_code=True)
+    # ── 모델 / 토크나이저 로드 ────────────────────────────────────────────
+    if args.sft_ckpt:
+        sft_path = Path(args.sft_ckpt)
+        is_peft = (sft_path / "adapter_config.json").exists()
+
+        if is_peft:
+            # SFT 저장본이 LoRA adapter → 원본 노트북과 동일하게 merge_and_unload
+            print(f"  SFT 체크포인트(PEFT): {sft_path}")
+            print("  → base 모델 로드 후 LoRA merge...")
+            tokenizer = AutoTokenizer.from_pretrained(
+                str(sft_path), trust_remote_code=True
+            )
+            model = AutoModelForCausalLM.from_pretrained(
+                raw_model_id,
+                dtype=torch.bfloat16,
+                device_map="auto",
+                trust_remote_code=True,
+            )
+            model = PeftModel.from_pretrained(model, str(sft_path), is_trainable=False)
+            model = model.merge_and_unload()
+            print("  → merge 완료")
+        else:
+            # 이미 merged full model로 저장된 경우
+            print(f"  SFT 체크포인트(full): {sft_path}")
+            tokenizer = AutoTokenizer.from_pretrained(
+                str(sft_path), trust_remote_code=True
+            )
+            model = AutoModelForCausalLM.from_pretrained(
+                str(sft_path),
+                dtype=torch.bfloat16,
+                device_map="auto",
+                trust_remote_code=True,
+            )
+    else:
+        print(f"  Raw 모델: {raw_model_id}")
+        tokenizer = AutoTokenizer.from_pretrained(raw_model_id, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            raw_model_id,
+            dtype=torch.bfloat16,
+            device_map="auto",
+            trust_remote_code=True,
+        )
+
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"  # DPO는 left padding
-
-    # 모델
-    print("모델 로드 중...")
-    model = AutoModelForCausalLM.from_pretrained(
-        base_model_id,
-        dtype=torch.bfloat16,
-        device_map="auto",
-        trust_remote_code=True,
-    )
     model.config.use_cache = False
 
-    # LoRA (SFT 체크포인트면 이미 PEFT 모델일 수 있음)
-    if not args.sft_ckpt:
-        _lora_targets = (
-            LORA_TARGET_MODULES_GEMMA4 if args.base == "gemma4" else LORA_TARGET_MODULES
-        )
-        lora_cfg = LoraConfig(
-            r=LORA_R,
-            lora_alpha=LORA_ALPHA,
-            lora_dropout=LORA_DROPOUT,
-            target_modules=_lora_targets,
-            bias="none",
-            task_type="CAUSAL_LM",
-        )
-        model = get_peft_model(model, lora_cfg)
-        model.print_trainable_parameters()
+    # ── LoRA 적용 (항상 새로 붙임 — merge 후이므로) ───────────────────────
+    _lora_targets = (
+        LORA_TARGET_MODULES_GEMMA4 if args.base == "gemma4" else LORA_TARGET_MODULES
+    )
+    lora_cfg = LoraConfig(
+        r=LORA_R,
+        lora_alpha=LORA_ALPHA,
+        lora_dropout=LORA_DROPOUT,
+        target_modules=_lora_targets,
+        bias="none",
+        task_type="CAUSAL_LM",
+    )
+    model = get_peft_model(model, lora_cfg)
+    model.print_trainable_parameters()
 
     # 데이터셋
     dataset = build_dpo_dataset(df, vital_map, tokenizer)
 
-    # DPOConfig
     cfg = dict(RLAIF_CONFIG)
-    loss_type = cfg.pop("loss_type", args.loss)
-    dpo_config = DPOConfig(
-        output_dir=str(output_dir),
-        loss_type={"dpo": "sigmoid", "simpo": "ipo"}.get(args.loss, args.loss),
-        seed=42,
-        report_to="none",
-        gradient_checkpointing=True,
-        **{
-            k: v
-            for k, v in cfg.items()
-            if k
-            not in (
-                "loss_type",
-                "num_train_epochs",
-                "save_strategy",
-                "dataloader_num_workers",
-            )
-        },
-    )
+    cfg.pop("loss_type", None)
+    shared_kwargs = {k: v for k, v in cfg.items() if k != "dataloader_num_workers"}
 
-    trainer = DPOTrainer(
-        model=model,
-        ref_model=None,  # SimPO/온라인 DPO는 ref_model 없이도 동작
-        args=dpo_config,
-        train_dataset=dataset,
-        processing_class=tokenizer,
-    )
+    if args.loss == "simpo":
+        from simpo_config import SimPOConfig
+        from simpo_trainer import SimPOTrainer
+
+        simpo_cfg = SimPOConfig(
+            output_dir=str(output_dir),
+            beta=2.0,                                        # SimPO 논문 기본값 (DPO의 0.1과 다름)
+            gamma_beta_ratio=0.25,
+            max_length=shared_kwargs.pop("max_length", 2048),
+            max_prompt_length=1792,
+            seed=42,
+            report_to="none",
+            gradient_checkpointing=True,
+            **{k: v for k, v in shared_kwargs.items() if k != "beta"},  # beta 중복 방지
+        )
+        trainer = SimPOTrainer(
+            model=model,
+            args=simpo_cfg,
+            train_dataset=dataset,
+            tokenizer=tokenizer,
+        )
+    else:
+        dpo_config = DPOConfig(
+            output_dir=str(output_dir),
+            loss_type="sigmoid",
+            seed=42,
+            report_to="none",
+            gradient_checkpointing=True,
+            **shared_kwargs,
+        )
+        trainer = DPOTrainer(
+            model=model,
+            ref_model=None,
+            args=dpo_config,
+            train_dataset=dataset,
+            processing_class=tokenizer,
+        )
 
     print("\n학습 시작...")
     trainer.train()

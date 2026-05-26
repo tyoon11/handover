@@ -19,36 +19,8 @@ if _gpus:
 from transformers import AutoTokenizer
 from config import (
     SYNTH_PKL, VITAL_MAP_PKL, SFT_MODELS,
-    SYSTEM_PROMPT, build_user_prompt,
-    EMR_PREOP_SUM_COL, EMR_PREMED_COL,
+    SYSTEM_PROMPT, build_user_prompt, build_emr_text,
 )
-
-def _get(row, col):
-    try:
-        v = row[col]
-    except KeyError:
-        return ""
-    if v is None or (isinstance(v, float) and pd.isna(v)):
-        return ""
-    if isinstance(v, dict):
-        vals = []
-        for vlist in v.values():
-            if isinstance(vlist, list):
-                vals.extend([str(x) for x in vlist if x is not None])
-            else:
-                vals.append(str(vlist))
-        return " ".join(vals)
-    return str(v)
-
-def _emr_text(row):
-    parts = []
-    preop  = _get(row, EMR_PREOP_SUM_COL)
-    premed = _get(row, EMR_PREMED_COL)
-    anrec  = _get(row, ("마취기록", "기록", ""))
-    if preop:  parts.append(f"[마취전 환자상태 요약]\n{preop}")
-    if premed: parts.append(f"[수술전 준비사항 및 Premedication]\n{premed}")
-    if anrec:  parts.append(f"[마취기록]\n{anrec}")
-    return "\n\n".join(parts)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -70,7 +42,7 @@ def main():
 
     lengths = []
     for _, row in synth_df.iterrows():
-        emr = _emr_text(row)
+        emr = build_emr_text(row)
         try:
             v = row["수술 ID"]
             sid = int(v.iloc[0]) if hasattr(v, "iloc") else int(v)

@@ -38,15 +38,15 @@ fi
 echo ""
 echo "[2/6] HuggingFace 핵심 라이브러리..."
 pip install \
-  transformers==4.44.2 \
-  tokenizers==0.19.1 \
-  datasets==2.21.0 \
-  huggingface_hub==0.24.6 \
-  accelerate==0.33.0 \
+  transformers==4.51.3 \
+  tokenizers==0.21.1 \
+  datasets==3.6.0 \
+  huggingface_hub==0.30.0 \
+  accelerate==1.6.0 \
   safetensors==0.4.4 \
   sentencepiece==0.2.0 \
   --quiet
-echo "  → transformers, datasets, accelerate, sentencepiece 완료"
+echo "  → transformers 4.51.3 (Qwen3 지원), datasets, accelerate, sentencepiece 완료"
 
 # ── 3. PEFT + TRL ──────────────────────────────────────────────────────
 echo ""

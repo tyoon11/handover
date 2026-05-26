@@ -43,9 +43,10 @@ from config import (
     INFER_OUT,
     SYSTEM_PROMPT,
     build_user_prompt,
+    build_emr_text,
     INFER_CONFIG,
-    EMR_PREOP_SUM_COL,
-    EMR_PREMED_COL,
+    INFER_CONFIG_THINKING,
+    INFER_ENABLE_THINKING,
 )
 
 SPLIT_MAP = {
@@ -111,38 +112,6 @@ def is_thinking_model(model_path: str, tokenizer) -> bool:
 # ── 유틸 ────────────────────────────────────────────────────────────────
 
 
-def _get(row, col):
-    try:
-        v = row[col]
-    except KeyError:
-        return ""
-    if v is None or (isinstance(v, float) and pd.isna(v)):
-        return ""
-    if isinstance(v, dict):
-        vals = []
-        for vlist in v.values():
-            if isinstance(vlist, list):
-                vals.extend([str(x) for x in vlist if x is not None])
-            else:
-                vals.append(str(vlist))
-        return " ".join(vals)
-    return str(v)
-
-
-def _emr_text(row):
-    preop = _get(row, EMR_PREOP_SUM_COL)
-    premed = _get(row, EMR_PREMED_COL)
-    anrec = _get(row, ("마취기록", "기록", ""))
-    parts = []
-    if preop:
-        parts.append(f"[마취전 환자상태 요약]\n{preop}")
-    if premed:
-        parts.append(f"[수술전 준비사항 및 Premedication]\n{premed}")
-    if anrec:
-        parts.append(f"[마취기록]\n{anrec}")
-    return "\n\n".join(parts)
-
-
 def load_model(model_path: str, base_model_id: str = None):
     """모델 로드. PEFT 체크포인트면 base + adapter 방식."""
     adapter_config = Path(model_path) / "adapter_config.json"
@@ -174,18 +143,24 @@ def load_model(model_path: str, base_model_id: str = None):
     return model, tokenizer
 
 
-def apply_chat_template_safe(tokenizer, msgs: list, thinking: bool) -> str:
+def apply_chat_template_safe(tokenizer, msgs: list, enable_thinking: bool) -> str:
     """
     apply_chat_template 호출.
-    Qwen3 계열이면 enable_thinking=True로 thinking 활성화.
+    원본 노트북과 동일: 기본값은 enable_thinking=False.
+    --thinking 플래그를 줬을 때만 True로 활성화.
     구버전 tokenizer는 enable_thinking 미지원이므로 try/except 처리.
     """
     kwargs = dict(tokenize=False, add_generation_prompt=True)
-    if thinking:
+    if enable_thinking:
         try:
             return tokenizer.apply_chat_template(msgs, enable_thinking=True, **kwargs)
         except TypeError:
-            pass  # enable_thinking 미지원 tokenizer → 일반 방식으로 fallback
+            pass  # enable_thinking 미지원 → fallback
+    else:
+        try:
+            return tokenizer.apply_chat_template(msgs, enable_thinking=False, **kwargs)
+        except TypeError:
+            pass
     return tokenizer.apply_chat_template(msgs, **kwargs)
 
 
@@ -217,16 +192,33 @@ def run_inference(args):
     # 모델 로드
     model, tokenizer = load_model(model_path, args.base_model)
 
-    # Thinking 모델 여부
-    thinking = is_thinking_model(args.base_model or model_path, tokenizer)
-    print(f"  Thinking 모드: {'ON' if thinking else 'OFF'}")
+    # Thinking 모드 결정:
+    # 1) --thinking 플래그가 있으면 무조건 ON
+    # 2) 없으면 config의 INFER_ENABLE_THINKING 기본값(False) 사용
+    # ※ 원본 학습은 모두 enable_thinking=False → 기본값은 False 권장
+    is_thinking_arch = is_thinking_model(args.base_model or model_path, tokenizer)
+    enable_thinking = (
+        args.thinking if args.thinking is not None else INFER_ENABLE_THINKING
+    )
 
-    cfg = INFER_CONFIG
-    print(f"  max_new_tokens: {cfg['max_new_tokens']}")
+    if is_thinking_arch and enable_thinking:
+        cfg = INFER_CONFIG_THINKING
+        print(f"  Thinking 모드: ON  (max_new_tokens={cfg['max_new_tokens']})")
+        print(
+            "  ※ 주의: 학습이 enable_thinking=False로 진행됐다면 분포 불일치 발생 가능"
+        )
+    elif is_thinking_arch and not enable_thinking:
+        cfg = INFER_CONFIG
+        print(
+            f"  Thinking 모드: OFF  (max_new_tokens={cfg['max_new_tokens']}, 원본 학습과 일치)"
+        )
+    else:
+        cfg = INFER_CONFIG
+        print(f"  max_new_tokens: {cfg['max_new_tokens']}")
 
     with open(out_file, "w", encoding="utf-8") as fout:
         for i, (_, row) in enumerate(tqdm(df.iterrows(), total=len(df))):
-            emr = _emr_text(row)
+            emr = build_emr_text(row)
             try:
                 v = row["수술 ID"]
                 sid = int(v.iloc[0]) if hasattr(v, "iloc") else int(v)
@@ -240,7 +232,7 @@ def run_inference(args):
                 {"role": "user", "content": user},
             ]
 
-            prompt = apply_chat_template_safe(tokenizer, msgs, thinking)
+            prompt = apply_chat_template_safe(tokenizer, msgs, enable_thinking)
 
             inputs = tokenizer(
                 prompt,
@@ -266,8 +258,8 @@ def run_inference(args):
                 skip_special_tokens=True,
             ).strip()
 
-            # thinking 블록 제거 → judge용 정제 텍스트
-            cleaned = clean_output(raw) if thinking else raw
+            # thinking 블록 제거 (thinking ON/OFF 관계없이 항상 적용 — 방어적 처리)
+            cleaned = clean_output(raw)
 
             rec = {
                 "idx": i,
@@ -305,6 +297,16 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="출력 폴더 태그 (예: llama_raw). 없으면 모델명으로 자동 결정",
+    )
+    parser.add_argument(
+        "--thinking",
+        action="store_true",
+        default=None,
+        help=(
+            "Qwen3 thinking 모드 활성화. "
+            "지정 시 max_new_tokens=8192(INFER_CONFIG_THINKING) 자동 적용. "
+            "※ 원본 학습은 enable_thinking=False이므로 기본값은 OFF."
+        ),
     )
     parser.add_argument(
         "--gpus", type=str, default=None, help="사용할 GPU 번호. 예: '0' 또는 '0,1'"
