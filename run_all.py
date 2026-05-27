@@ -19,12 +19,14 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
 
+
 # ── GPU 조기 파싱 ─────────────────────────────────────────────────────────
 def _early_gpus():
     p = argparse.ArgumentParser(add_help=False)
-    p.add_argument("--gpus",   type=str, default=None)
+    p.add_argument("--gpus", type=str, default=None)
     p.add_argument("--run_id", type=str, default=None)
     return p.parse_known_args()[0]
+
 
 _early = _early_gpus()
 _RUN_ID = (
@@ -37,21 +39,29 @@ print(f"[RUN] HANDOVER_RUN_ID={_RUN_ID}")
 
 import pandas as pd
 from config import (
-    SFT_MODELS, SFT_OUT, RLAIF_OUT, INFER_OUT, EVAL_OUT, SAMPLE_OUT,
-    OUTPUT_BASE, GOLD_PKL, GOLD_REF_PKL, VITAL_MAP_PKL,
+    SFT_MODELS,
+    SFT_OUT,
+    RLAIF_OUT,
+    INFER_OUT,
+    EVAL_OUT,
+    SAMPLE_OUT,
+    OUTPUT_BASE,
+    GOLD_PKL,
+    GOLD_REF_PKL,
+    VITAL_MAP_PKL,
 )
 
 # ── 실험 정의 ─────────────────────────────────────────────────────────────
 # (key, sft_epochs, rlaif_loss, sft_dep_key)
 # sft_dep_key: 이 실험이 완료돼야 시작 가능한 선행 SFT 실험 키
 EXPERIMENTS = [
-    ("raw",         None, None,    None),
-    ("rlaif_dpo",   None, "dpo",   None),
+    ("raw", None, None, None),
+    ("rlaif_dpo", None, "dpo", None),
     ("rlaif_simpo", None, "simpo", None),
-    ("sft_1ep",     1,    None,    None),
-    ("sft_3ep",     3,    None,    None),
-    ("sft_1ep_dpo", 1,    "dpo",   "sft_1ep"),
-    ("sft_3ep_dpo", 3,    "dpo",   "sft_3ep"),
+    ("sft_1ep", 1, None, None),
+    ("sft_3ep", 3, None, None),
+    ("sft_1ep_dpo", 1, "dpo", "sft_1ep"),
+    ("sft_3ep_dpo", 3, "dpo", "sft_3ep"),
 ]
 
 LOG_FILE = OUTPUT_BASE / "run_all.log"
@@ -75,10 +85,11 @@ class GpuPool:
 
     예: gpus="0,1,2,3", gpus_per_job=2 → ["0,1", "2,3"] 두 슬롯
     """
+
     def __init__(self, gpus_str: str, gpus_per_job: int):
         ids = [g.strip() for g in gpus_str.split(",")]
         groups = [
-            ",".join(ids[i:i + gpus_per_job])
+            ",".join(ids[i : i + gpus_per_job])
             for i in range(0, len(ids), gpus_per_job)
         ]
         self._q: Queue = Queue()
@@ -108,7 +119,7 @@ def _ckpt(model: str, exp_key: str) -> Path:
     if exp_key == "raw":
         return SFT_MODELS[model]
     if exp_key.startswith("sft_") and "dpo" not in exp_key and "simpo" not in exp_key:
-        ep = exp_key.split("_")[1]          # "1ep" or "3ep"
+        ep = exp_key.split("_")[1]  # "1ep" or "3ep"
         return SFT_OUT / f"{model}_{ep}" / "final"
     if exp_key == "rlaif_dpo":
         return RLAIF_OUT / f"{model}_raw_dpo" / "final"
@@ -159,7 +170,7 @@ def _execute_exp(
             log(f"  [SKIP] [{tag}] SFT {sft_ep}ep")
         else:
             ok = _run(
-                [py, "02_sft_train.py", "--base", model, "--epochs", str(sft_ep)],
+                [py, "pipeline/02_sft_train.py", "--base", model, "--epochs", str(sft_ep)],
                 f"SFT {sft_ep}ep",
             )
             if not ok:
@@ -170,16 +181,16 @@ def _execute_exp(
         if sft_dep_key:
             ep = sft_dep_key.split("_")[1].replace("ep", "")  # "sft_1ep" → "1"
             sft_ckpt = str(SFT_OUT / f"{model}_{ep}ep" / "final")
-            rlaif_tag = f"{model}_sft{ep}ep_{rlaif_loss}"      # "llama_sft1ep_dpo"
+            rlaif_tag = f"{model}_sft{ep}ep_{rlaif_loss}"  # "llama_sft1ep_dpo"
         else:
             sft_ckpt = None
-            rlaif_tag = f"{model}_raw_{rlaif_loss}"             # "llama_raw_dpo"
+            rlaif_tag = f"{model}_raw_{rlaif_loss}"  # "llama_raw_dpo"
 
         rlaif_final = RLAIF_OUT / rlaif_tag / "final"
         if skip_done and (rlaif_final / "config.json").exists():
             log(f"  [SKIP] [{tag}] RLAIF {rlaif_loss}")
         else:
-            cmd = [py, "03_rlaif_train.py", "--base", model, "--loss", rlaif_loss]
+            cmd = [py, "pipeline/03_rlaif_train.py", "--base", model, "--loss", rlaif_loss]
             if sft_ckpt:
                 cmd += ["--sft_ckpt", sft_ckpt]
             ok = _run(cmd, f"RLAIF {rlaif_loss}")
@@ -193,10 +204,14 @@ def _execute_exp(
     else:
         ckpt = str(_ckpt(model, exp_key))
         cmd = [
-            py, "04_inference.py",
-            "--model_path", ckpt,
-            "--split", "gold",
-            "--out_tag", f"{model}_{exp_key}",
+            py,
+            "pipeline/04_inference.py",
+            "--model_path",
+            ckpt,
+            "--split",
+            "gold",
+            "--out_tag",
+            f"{model}_{exp_key}",
         ]
         if exp_key != "raw":
             cmd += ["--base_model", str(SFT_MODELS[model])]
@@ -210,9 +225,14 @@ def _execute_exp(
         log(f"  [SKIP] [{tag}] Evaluate")
     elif infer_file.exists():
         _run(
-            [py, "05_evaluate.py",
-             "--result_file", str(infer_file),
-             "--out_tag", f"{model}_{exp_key}"],
+            [
+                py,
+                "pipeline/05_evaluate.py",
+                "--result_file",
+                str(infer_file),
+                "--out_tag",
+                f"{model}_{exp_key}",
+            ],
             "Evaluate",
         )
         make_sample_md(model, exp_key)
@@ -225,7 +245,7 @@ def _run_exp_with_dep(
     model: str,
     exp: tuple,
     gpu_pool: GpuPool,
-    dep_future,          # Future | None
+    dep_future,  # Future | None
     skip_done: bool,
     only_eval: bool,
 ) -> bool:
@@ -270,7 +290,12 @@ def run_parallel(
 
                 f = executor.submit(
                     _run_exp_with_dep,
-                    model, exp, gpu_pool, dep_future, skip_done, only_eval,
+                    model,
+                    exp,
+                    gpu_pool,
+                    dep_future,
+                    skip_done,
+                    only_eval,
                 )
                 futures[(model, exp_key)] = f
 
@@ -296,7 +321,7 @@ def make_sample_md(model: str, exp_key: str, n_samples: int = 5):
 
     try:
         gold_df = pd.read_pickle(GOLD_PKL)
-        ref_df  = pd.read_pickle(GOLD_REF_PKL)
+        ref_df = pd.read_pickle(GOLD_REF_PKL)
     except Exception:
         gold_df = ref_df = None
 
@@ -325,7 +350,11 @@ def make_sample_md(model: str, exp_key: str, n_samples: int = 5):
         idx = rec["idx"]
         sid = rec.get("sid", -1)
         gen = rec["generated"]
-        b, c, s = rec.get("brevity_score","-"), rec.get("critical_score","-"), rec.get("sum_score","-")
+        b, c, s = (
+            rec.get("brevity_score", "-"),
+            rec.get("critical_score", "-"),
+            rec.get("sum_score", "-"),
+        )
 
         opname = "-"
         if gold_df is not None and idx < len(gold_df):
@@ -339,14 +368,15 @@ def make_sample_md(model: str, exp_key: str, n_samples: int = 5):
         if ref_df is not None and idx < len(ref_df):
             try:
                 human = str(ref_df.iloc[idx][("마취기록", "기록", "")])
-                if human == "nan": human = "-"
+                if human == "nan":
+                    human = "-"
             except Exception:
                 pass
 
         vital = vital_map.get(sid, "-")
-        vital_cell  = vital.replace("\n", "<br>") if vital != "-" else "-"
-        gen_cell    = gen.replace("\n", "<br>")
-        human_cell  = human.replace("\n", "<br>") if human != "-" else "-"
+        vital_cell = vital.replace("\n", "<br>") if vital != "-" else "-"
+        gen_cell = gen.replace("\n", "<br>")
+        human_cell = human.replace("\n", "<br>") if human != "-" else "-"
 
         md += [
             f"\n---\n",
@@ -370,31 +400,39 @@ def make_sample_md(model: str, exp_key: str, n_samples: int = 5):
 def summarize_results():
     rows = []
     for score_file in sorted(EVAL_OUT.rglob("*_scores.jsonl")):
-        tag   = score_file.parent.name
+        tag = score_file.parent.name
         parts = tag.split("_", 1)
         model = parts[0]
         exp_key = parts[1] if len(parts) > 1 else "?"
-        lines = [json.loads(l) for l in score_file.read_text().splitlines() if l.strip()]
+        lines = [
+            json.loads(l) for l in score_file.read_text().splitlines() if l.strip()
+        ]
         if not lines:
             continue
         avg_b = sum(l.get("brevity_score", 0) for l in lines) / len(lines)
         avg_c = sum(l.get("critical_score", 0) for l in lines) / len(lines)
-        rows.append(dict(
-            model=model, experiment=exp_key, n=len(lines),
-            brevity=round(avg_b,3), critical=round(avg_c,3), sum=round(avg_b+avg_c,3),
-        ))
+        rows.append(
+            dict(
+                model=model,
+                experiment=exp_key,
+                n=len(lines),
+                brevity=round(avg_b, 3),
+                critical=round(avg_c, 3),
+                sum=round(avg_b + avg_c, 3),
+            )
+        )
 
     if not rows:
         print("\n[결과 없음] 평가 완료된 실험이 없습니다.")
         return
 
-    df = pd.DataFrame(rows).sort_values(["model","sum"], ascending=[True,False])
+    df = pd.DataFrame(rows).sort_values(["model", "sum"], ascending=[True, False])
 
-    print("\n" + "="*72)
+    print("\n" + "=" * 72)
     print(f" 실험 결과 요약  (run_id: {_RUN_ID})")
-    print("="*72)
+    print("=" * 72)
     print(df.to_string(index=False))
-    print("="*72)
+    print("=" * 72)
 
     csv_path = OUTPUT_BASE / "results_summary.csv"
     df.to_csv(csv_path, index=False, encoding="utf-8-sig")
@@ -408,14 +446,18 @@ def summarize_results():
         "|-------|-----------|---|---------|----------|-----|\n",
     ]
     for _, r in df.iterrows():
-        md.append(f"| {r.model} | {r.experiment} | {r.n} | {r.brevity} | {r.critical} | **{r['sum']}** |\n")
+        md.append(
+            f"| {r.model} | {r.experiment} | {r.n} | {r.brevity} | {r.critical} | **{r['sum']}** |\n"
+        )
 
     md.append("\n## 모델별 Best\n\n")
     md.append("| model | best_experiment | sum | brevity | critical |\n")
     md.append("|-------|----------------|-----|---------|----------|\n")
     for model, g in df.groupby("model"):
         best = g.iloc[0]
-        md.append(f"| {model} | {best['experiment']} | **{best['sum']}** | {best['brevity']} | {best['critical']} |\n")
+        md.append(
+            f"| {model} | {best['experiment']} | **{best['sum']}** | {best['brevity']} | {best['critical']} |\n"
+        )
 
     md_path.write_text("".join(md), encoding="utf-8")
     print(f"\n  CSV: {csv_path}")
@@ -436,47 +478,71 @@ def compare_models(file_a: str, file_b: str):
     df_a = load_scores(file_a)
     df_b = load_scores(file_b)
 
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print(f"Model A: {file_a}\nModel B: {file_b}")
-    print("="*70)
+    print("=" * 70)
 
-    cols = [c for c in ["brevity_score","critical_score","sum_score","scale_large","scale_xl"]
-            if c in df_a.columns]
+    cols = [
+        c
+        for c in [
+            "brevity_score",
+            "critical_score",
+            "sum_score",
+            "scale_large",
+            "scale_xl",
+        ]
+        if c in df_a.columns
+    ]
     for col in cols:
         A, B = np.array(df_a[col]), np.array(df_b[col])
         d = A - B
         t_stat, p_t = stats.ttest_rel(A, B)
         dz = d.mean() / d.std(ddof=1)
-        se = d.std(ddof=1) / (len(d)**0.5)
-        ci = (d.mean() - 1.984*se, d.mean() + 1.984*se)
+        se = d.std(ddof=1) / (len(d) ** 0.5)
+        ci = (d.mean() - 1.984 * se, d.mean() + 1.984 * se)
         w_stat, p_w = stats.wilcoxon(A, B, zero_method="wilcox")
-        wins = int((d>0).sum()); losses = int((d<0).sum())
-        rb = (wins-losses)/(wins+losses) if (wins+losses) > 0 else float("nan")
-        p_sign = stats.binomtest(wins, wins+losses, p=0.5).pvalue
+        wins = int((d > 0).sum())
+        losses = int((d < 0).sum())
+        rb = (wins - losses) / (wins + losses) if (wins + losses) > 0 else float("nan")
+        p_sign = stats.binomtest(wins, wins + losses, p=0.5).pvalue
         sig_t = " !!!" if p_t < 0.05 else ""
         sig_w = " !!!" if p_w < 0.05 else ""
         sig_s = " !!!" if p_sign < 0.05 else ""
         print(f"\n── {col} ──")
-        print(f"  Paired t  : t={t_stat:.3f}, p={p_t:.4g}, Δ={d.mean():.4f}, CI={ci}, dz={dz:.3f}{sig_t}")
+        print(
+            f"  Paired t  : t={t_stat:.3f}, p={p_t:.4g}, Δ={d.mean():.4f}, CI={ci}, dz={dz:.3f}{sig_t}"
+        )
         print(f"  Wilcoxon  : W={w_stat}, p={p_w:.4g}, rank-biserial={rb:.3f}{sig_w}")
         print(f"  Sign test : wins={wins}, losses={losses}, p={p_sign:.4g}{sig_s}")
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
 
 
 # ── 진입점 ────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="전체 파이프라인 병렬 실행")
-    parser.add_argument("--models", nargs="+", choices=list(SFT_MODELS.keys()), default=["llama"])
-    parser.add_argument("--gpus",          type=str, default="0,1,2,3", help="사용할 GPU (예: 0,1,2,3)")
-    parser.add_argument("--gpus_per_job",  type=int, default=1,
-                        help="잡당 GPU 수 (기본 1 — 48GB GPU는 8B 모델에 충분, 2로 늘리면 더 안전)")
-    parser.add_argument("--run_id",        type=str, default=None)
-    parser.add_argument("--skip_done",     action="store_true", help="완료된 단계 건너뜀")
-    parser.add_argument("--only_eval",     action="store_true", help="Inference+Evaluate만")
-    parser.add_argument("--summarize",     action="store_true", help="결과 요약만 출력")
-    parser.add_argument("--experiments",   nargs="+", choices=[e[0] for e in EXPERIMENTS], default=None)
-    parser.add_argument("--n_samples",     type=int, default=5, help="샘플 MD 케이스 수")
-    parser.add_argument("--compare",       nargs=2, metavar=("FILE_A","FILE_B"), default=None)
+    parser.add_argument(
+        "--models", nargs="+", choices=list(SFT_MODELS.keys()), default=["llama"]
+    )
+    parser.add_argument(
+        "--gpus", type=str, default="0,1,2,3", help="사용할 GPU (예: 0,1,2,3)"
+    )
+    parser.add_argument(
+        "--gpus_per_job",
+        type=int,
+        default=1,
+        help="잡당 GPU 수 (기본 1 — 48GB GPU는 8B 모델에 충분, 2로 늘리면 더 안전)",
+    )
+    parser.add_argument("--run_id", type=str, default=None)
+    parser.add_argument("--skip_done", action="store_true", help="완료된 단계 건너뜀")
+    parser.add_argument("--only_eval", action="store_true", help="Inference+Evaluate만")
+    parser.add_argument("--summarize", action="store_true", help="결과 요약만 출력")
+    parser.add_argument(
+        "--experiments", nargs="+", choices=[e[0] for e in EXPERIMENTS], default=None
+    )
+    parser.add_argument("--n_samples", type=int, default=5, help="샘플 MD 케이스 수")
+    parser.add_argument(
+        "--compare", nargs=2, metavar=("FILE_A", "FILE_B"), default=None
+    )
     args = parser.parse_args()
 
     if args.compare:
@@ -498,7 +564,14 @@ def main():
     log(f"실험:         {[e[0] for e in active_exps]}")
     log(f"GPU:          {args.gpus}  ({args.gpus_per_job}개/잡)")
 
-    run_parallel(args.models, args.gpus, args.gpus_per_job, args.skip_done, args.only_eval, active_exps)
+    run_parallel(
+        args.models,
+        args.gpus,
+        args.gpus_per_job,
+        args.skip_done,
+        args.only_eval,
+        active_exps,
+    )
 
     log("\n모든 파이프라인 완료.")
     summarize_results()
