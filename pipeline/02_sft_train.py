@@ -298,6 +298,8 @@ def train(args):
         seed=42,
         report_to="none",
         remove_unused_columns=False,
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         **cfg,
     )
 

@@ -181,7 +181,7 @@ def stage_sft(base: str, steps: int = 3, n_samples: int = 8):
     model.config.use_cache = False
     model.print_trainable_parameters()
 
-    mem = torch.cuda.memory_allocated() / 1e9
+    mem = sum(torch.cuda.memory_allocated(i) for i in range(torch.cuda.device_count())) / 1e9
     print(f"  GPU 메모리(로드 후): {mem:.1f}GB")
 
     # 학습
@@ -203,7 +203,7 @@ def stage_sft(base: str, steps: int = 3, n_samples: int = 8):
     if result is None:
         return False
 
-    mem2 = torch.cuda.memory_allocated() / 1e9
+    mem2 = sum(torch.cuda.memory_allocated(i) for i in range(torch.cuda.device_count())) / 1e9
     print(f"  GPU 메모리(학습 후): {mem2:.1f}GB")
     print(f"\n{PASS} stage_sft 완료 → 02_sft_train.py 실행 가능")
     return True
@@ -349,7 +349,12 @@ def stage_infer(base: str, n: int = 2):
         vital = vmap.get(sid, "")
         user = build_user_prompt(emr, vital)
         msgs = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}]
-        prompt = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+        try:
+            prompt = tokenizer.apply_chat_template(
+                msgs, tokenize=False, add_generation_prompt=True, enable_thinking=False
+            )
+        except TypeError:
+            prompt = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
         inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048).to(model.device)
 
         with torch.no_grad():

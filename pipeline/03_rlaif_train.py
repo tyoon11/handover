@@ -232,6 +232,7 @@ def train(args):
             seed=42,
             report_to="none",
             gradient_checkpointing=True,
+            gradient_checkpointing_kwargs={"use_reentrant": False},
             **{k: v for k, v in shared_kwargs.items() if k != "beta"},  # beta 중복 방지
         )
         trainer = SimPOTrainer(
@@ -247,6 +248,7 @@ def train(args):
             seed=42,
             report_to="none",
             gradient_checkpointing=True,
+            gradient_checkpointing_kwargs={"use_reentrant": False},
             **shared_kwargs,
         )
         trainer = DPOTrainer(
