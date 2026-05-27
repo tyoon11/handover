@@ -126,17 +126,21 @@ CRITICAL_RUBRIC = """\
 
 
 def load_judge_model(model_id: str):
+    import tempfile
     print(f"Judge 모델 로드: {model_id}")
     tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     _max_mem = {i: "40GiB" for i in range(torch.cuda.device_count())}
+    # MoE 모델(Mixtral 계열)은 weight 재저장 시 offload_folder 필요
+    _offload_dir = tempfile.mkdtemp(prefix="hf_offload_judge_")
     mdl = AutoModelForCausalLM.from_pretrained(
         model_id,
         dtype=torch.bfloat16,
         device_map="auto",
         max_memory=_max_mem,
         low_cpu_mem_usage=True,
+        offload_folder=_offload_dir,
         trust_remote_code=True,
     )
     mdl.eval()
