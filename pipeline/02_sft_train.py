@@ -259,10 +259,13 @@ def train(args):
     if args.base != "gemma4" and importlib.util.find_spec("flash_attn") is not None:
         _attn_kwargs["attn_implementation"] = "flash_attention_2"
 
+    _max_mem = {i: "40GiB" for i in range(torch.cuda.device_count())}
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         torch_dtype=torch.bfloat16,
         device_map="auto",
+        max_memory=_max_mem,
+        low_cpu_mem_usage=True,
         trust_remote_code=True,
         **_attn_kwargs,
     )

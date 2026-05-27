@@ -45,7 +45,7 @@ except ImportError:
             return False
 
 
-from simpo_config import SimPOConfig
+from .simpo_config import SimPOConfig
 
 from dataclasses import dataclass
 from typing import Dict, Literal, Optional

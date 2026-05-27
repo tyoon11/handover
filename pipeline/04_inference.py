@@ -124,20 +124,26 @@ def load_model(model_path: str, base_model_id: str = None):
     if is_peft and base_model_id:
         print(f"  PEFT 모델 로드: {model_path}")
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        _max_mem = {i: "40GiB" for i in range(torch.cuda.device_count())}
         base = AutoModelForCausalLM.from_pretrained(
             base_model_id,
             dtype=torch.bfloat16,
             device_map="auto",
+            max_memory=_max_mem,
+            low_cpu_mem_usage=True,
             trust_remote_code=True,
         )
         model = PeftModel.from_pretrained(base, model_path)
     else:
         print(f"  전체 모델 로드: {model_path}")
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        _max_mem = {i: "40GiB" for i in range(torch.cuda.device_count())}
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
             dtype=torch.bfloat16,
             device_map="auto",
+            max_memory=_max_mem,
+            low_cpu_mem_usage=True,
             trust_remote_code=True,
         )
 
