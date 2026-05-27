@@ -1012,7 +1012,7 @@ class SimPOTrainer(Trainer):
             return (loss, metrics)
         return loss
 
-    def get_batch_samples(
+    def _generate_batch_samples(
         self, model, batch: Dict[str, torch.LongTensor]
     ) -> Tuple[str, str]:
         """Generate samples from the model and reference model for the given batch of inputs."""
@@ -1125,7 +1125,7 @@ class SimPOTrainer(Trainer):
             random_batch = self.data_collator(random_batch_dataset)
             random_batch = self._prepare_inputs(random_batch)
 
-            policy_output_decoded = self.get_batch_samples(self.model, random_batch)
+            policy_output_decoded = self._generate_batch_samples(self.model, random_batch)
 
             self.log(
                 {
