@@ -130,10 +130,13 @@ def load_judge_model(model_id: str):
     tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
+    _max_mem = {i: "40GiB" for i in range(torch.cuda.device_count())}
     mdl = AutoModelForCausalLM.from_pretrained(
         model_id,
         dtype=torch.bfloat16,
         device_map="auto",
+        max_memory=_max_mem,
+        low_cpu_mem_usage=True,
         trust_remote_code=True,
     )
     mdl.eval()

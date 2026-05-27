@@ -195,7 +195,6 @@ def stage_sft(base: str, steps: int = 3, n_samples: int = 8):
     ))
     trainer = ok("SFTTrainer", lambda: SFTTrainer(
         model=model, args=cfg, train_dataset=dataset, processing_class=tokenizer,
-        max_seq_length=512,
     ))
     if trainer is None:
         return False
@@ -436,8 +435,16 @@ def stage_eval_inline(n: int = 2):
     """05_evaluate.py의 judge_score를 직접 import해서 테스트."""
     header(f"Stage: eval — judge {n} samples")
     import torch
+    import gc
     from config import GOLD_PKL, VITAL_MAP_PKL, EVAL_JUDGE_MODEL, build_user_prompt, build_emr_text
     import importlib.util
+
+    # 이전 모델 잔류 메모리 해제 (Prometheus/Mixtral MoE 로딩 전 필수)
+    gc.collect()
+    torch.cuda.empty_cache()
+    n_gpu = torch.cuda.device_count()
+    free = [torch.cuda.mem_get_info(i)[0] / 1e9 for i in range(n_gpu)]
+    print(f"  GPU 여유 메모리: {[f'{f:.1f}GB' for f in free]}")
 
     spec = importlib.util.spec_from_file_location(
         "ev05",
@@ -446,8 +453,23 @@ def stage_eval_inline(n: int = 2):
     ev05 = importlib.util.module_from_spec(spec)
     ok("05_evaluate.py import", lambda: spec.loader.exec_module(ev05))
 
-    tokenizer = ok("Judge 토크나이저", lambda: ev05.load_judge_model(EVAL_JUDGE_MODEL)[1])
-    model_and_tok = ok("Judge 모델", lambda: ev05.load_judge_model(EVAL_JUDGE_MODEL))
+    # Prometheus(Mixtral MoE) 로딩: max_memory로 GPU별 상한 설정
+    _max_mem = {i: "40GiB" for i in range(n_gpu)}
+    _orig_load = ev05.load_judge_model
+
+    def _load_with_mem(model_id):
+        import transformers
+        tok = transformers.AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        if tok.pad_token is None:
+            tok.pad_token = tok.eos_token
+        mdl = transformers.AutoModelForCausalLM.from_pretrained(
+            model_id, dtype=torch.bfloat16, device_map="auto",
+            max_memory=_max_mem, low_cpu_mem_usage=True, trust_remote_code=True,
+        )
+        mdl.eval()
+        return mdl, tok
+
+    model_and_tok = ok("Judge 모델", lambda: _load_with_mem(EVAL_JUDGE_MODEL))
     if model_and_tok is None:
         return False
     judge_model, judge_tok = model_and_tok
