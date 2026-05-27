@@ -397,19 +397,26 @@ class SimPOTrainer(Trainer):
                     self.tokenize_row, num_proc=args.dataset_num_proc
                 )
 
-        super().__init__(
+        # TRL>=0.9 renamed tokenizer→processing_class in Trainer.__init__
+        _trainer_kwargs = dict(
             model=model,
             args=args,
             data_collator=data_collator,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
-            tokenizer=tokenizer,
             model_init=model_init,
             compute_metrics=compute_metrics,
             callbacks=callbacks,
             optimizers=optimizers,
             preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         )
+        import inspect as _inspect
+        _trainer_sig = _inspect.signature(super().__init__)
+        if "processing_class" in _trainer_sig.parameters:
+            _trainer_kwargs["processing_class"] = tokenizer
+        else:
+            _trainer_kwargs["tokenizer"] = tokenizer
+        super().__init__(**_trainer_kwargs)
 
         # Add tags for models that have been loaded with the correct transformers version
         if hasattr(self.model, "add_model_tags"):

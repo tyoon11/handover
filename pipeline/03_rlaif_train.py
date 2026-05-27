@@ -138,12 +138,7 @@ def train(args):
     print(f"  데이터: {len(df)}건")
 
     # ── 모델 / 토크나이저 로드 ────────────────────────────────────────────
-    # gemma4(MoE)는 expert weight concat 시 단일 GPU에 메모리 집중 → 8GB 여유 확보
-    _max_mem = (
-        {i: "40GiB" for i in range(torch.cuda.device_count())}
-        if args.base == "gemma4"
-        else None
-    )
+    _max_mem = {i: "40GiB" for i in range(torch.cuda.device_count())}
     if args.sft_ckpt:
         sft_path = Path(args.sft_ckpt)
         is_peft = (sft_path / "adapter_config.json").exists()
