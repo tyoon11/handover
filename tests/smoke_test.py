@@ -190,11 +190,12 @@ def stage_sft(base: str, steps: int = 3, n_samples: int = 8):
         output_dir="/tmp/smoke_sft",
         max_steps=steps, per_device_train_batch_size=1,
         gradient_accumulation_steps=1, learning_rate=2e-4,
-        bf16=True, logging_steps=1, max_seq_length=512,
+        bf16=True, logging_steps=1,
         dataset_text_field="text", report_to="none", seed=42,
     ))
     trainer = ok("SFTTrainer", lambda: SFTTrainer(
         model=model, args=cfg, train_dataset=dataset, processing_class=tokenizer,
+        max_seq_length=512,
     ))
     if trainer is None:
         return False
@@ -228,7 +229,7 @@ def stage_rlaif(base: str, loss: str = "dpo", steps: int = 3, n_samples: int = 8
     df = ok("SYNTH_PKL", lambda: pd.read_pickle(SYNTH_PKL).iloc[:n_samples])
     vmap = ok("VITAL_MAP_PKL", lambda: pickle.load(open(VITAL_MAP_PKL, "rb")))
     tokenizer = ok("토크나이저", lambda: AutoTokenizer.from_pretrained(model_id, trust_remote_code=True))
-    if None in (df, vmap, tokenizer):
+    if df is None or vmap is None or tokenizer is None:
         return False
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -326,7 +327,7 @@ def stage_infer(base: str, n: int = 2):
         model_id, dtype=torch.bfloat16, device_map="auto",
         low_cpu_mem_usage=True, trust_remote_code=True,
     ))
-    if None in (tokenizer, model):
+    if tokenizer is None or model is None:
         return False
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -334,7 +335,7 @@ def stage_infer(base: str, n: int = 2):
 
     gold_df = ok("GOLD_PKL", lambda: pd.read_pickle(GOLD_PKL))
     vmap = ok("VITAL_MAP_PKL", lambda: pickle.load(open(VITAL_MAP_PKL, "rb")))
-    if None in (gold_df, vmap):
+    if gold_df is None or vmap is None:
         return False
 
     print(f"\n  Inference {n}건")
@@ -384,7 +385,7 @@ def stage_eval(n: int = 2):
         EVAL_JUDGE_MODEL, dtype=torch.bfloat16, device_map="auto",
         low_cpu_mem_usage=True, trust_remote_code=True,
     ))
-    if None in (tokenizer, model):
+    if tokenizer is None or model is None:
         return False
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -392,7 +393,7 @@ def stage_eval(n: int = 2):
 
     gold_df = ok("GOLD_PKL", lambda: pd.read_pickle(GOLD_PKL))
     vmap = ok("VITAL_MAP_PKL", lambda: pickle.load(open(VITAL_MAP_PKL, "rb")))
-    if None in (gold_df, vmap):
+    if gold_df is None or vmap is None:
         return False
 
     DUMMY_RESP = "SpO2 93% → O2 보충 유지. EBL 800mL → pRBC 2U 수혈."
@@ -453,7 +454,7 @@ def stage_eval_inline(n: int = 2):
 
     gold_df = ok("GOLD_PKL", lambda: pd.read_pickle(GOLD_PKL))
     vmap = ok("VITAL_MAP_PKL", lambda: pickle.load(open(VITAL_MAP_PKL, "rb")))
-    if None in (gold_df, vmap):
+    if gold_df is None or vmap is None:
         return False
 
     DUMMY = "SpO2 93% → O2 보충. EBL 800mL → pRBC 2U."
