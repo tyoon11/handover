@@ -306,12 +306,15 @@ def train(args):
         **cfg,
     )
 
-    # Trainer
+    # Trainer — TRL>=0.9 renamed tokenizer→processing_class
+    import inspect as _inspect
+    _trainer_init_params = _inspect.signature(Trainer.__init__).parameters
+    _tok_kwarg = "processing_class" if "processing_class" in _trainer_init_params else "tokenizer"
     trainer = Trainer(
         model=model,
         args=train_args,
         train_dataset=dataset,
-        tokenizer=tokenizer,
+        **{_tok_kwarg: tokenizer},
         data_collator=collator,
     )
     print("\n학습 시작...")
