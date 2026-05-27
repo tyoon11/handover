@@ -479,11 +479,17 @@ def stage_eval_inline(n: int = 2):
 
 
 # ── main ──────────────────────────────────────────────────────────────────
+ALL_MODELS = ["llama", "qwen", "gemma4", "qwen35", "hari"]
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="파이프라인 단계별 smoke test")
     parser.add_argument("--stage", choices=["data", "sft", "rlaif", "infer", "eval"], default=None)
     parser.add_argument("--all", action="store_true", help="모든 단계 순서대로 실행")
-    parser.add_argument("--base", choices=["llama", "qwen", "gemma4", "qwen35", "hari"], default="llama")
+    parser.add_argument(
+        "--models", nargs="+",
+        choices=ALL_MODELS + ["all"], default=["llama"],
+        help="테스트할 모델 (여러 개 가능, 'all'로 전체 선택)",
+    )
     parser.add_argument("--loss", choices=["dpo", "simpo"], default="dpo")
     parser.add_argument("--steps", type=int, default=3, help="학습 steps (sft/rlaif용)")
     parser.add_argument("--n", type=int, default=2, help="샘플 수 (infer/eval용)")
@@ -491,29 +497,53 @@ if __name__ == "__main__":
     parser.add_argument("--gpus", type=str, default=None)
     args = parser.parse_args()
 
-    results = {}
-
-    if args.all or args.stage == "data":
-        stage_data()
-        results["data"] = True
-
-    if args.all or args.stage == "sft":
-        results["sft"] = stage_sft(args.base, args.steps, args.samples)
-
-    if args.all or args.stage == "rlaif":
-        results["rlaif"] = stage_rlaif(args.base, args.loss, args.steps, args.samples)
-
-    if args.all or args.stage == "infer":
-        results["infer"] = stage_infer(args.base, args.n)
-
-    if args.all or args.stage == "eval":
-        results["eval"] = stage_eval_inline(args.n)
+    models = ALL_MODELS if "all" in args.models else args.models
 
     if not (args.stage or args.all):
         parser.print_help()
-    elif len(results) > 1:
-        print(f"\n{'='*60}")
-        print(" 전체 결과 요약")
-        print(f"{'='*60}")
-        for stage, ok_flag in results.items():
-            print(f"  {'✓' if ok_flag else '✗'} {stage}")
+        sys.exit(0)
+
+    # {model: {stage: bool}}
+    results: dict = {}
+
+    # data 단계는 모델 무관 — 한 번만
+    if args.all or args.stage == "data":
+        stage_data()
+        results.setdefault("_common", {})["data"] = True
+
+    for model in models:
+        results.setdefault(model, {})
+
+        if args.all or args.stage == "sft":
+            results[model]["sft"] = stage_sft(model, args.steps, args.samples)
+
+        if args.all or args.stage == "rlaif":
+            results[model]["rlaif"] = stage_rlaif(model, args.loss, args.steps, args.samples)
+
+        if args.all or args.stage == "infer":
+            results[model]["infer"] = stage_infer(model, args.n)
+
+    # eval 단계는 모델 무관 (judge 모델 고정) — 한 번만
+    if args.all or args.stage == "eval":
+        results.setdefault("_common", {})["eval"] = stage_eval_inline(args.n)
+
+    # ── 결과 요약 테이블 ──────────────────────────────────────────────────
+    print(f"\n{'='*60}")
+    print(" Smoke Test 결과 요약")
+    print(f"{'='*60}")
+
+    common = results.pop("_common", {})
+    for stage, flag in common.items():
+        print(f"  {'✓' if flag else '✗'} [공통] {stage}")
+
+    if results:
+        model_stages = sorted({s for v in results.values() for s in v})
+        header_row = f"  {'모델':<12}" + "".join(f" {s:<8}" for s in model_stages)
+        print(header_row)
+        print(f"  {'-'*12}" + "".join(f" {'-'*8}" for _ in model_stages))
+        for model, stages in results.items():
+            row = f"  {model:<12}" + "".join(
+                f" {'✓' if stages.get(s) else '✗':<8}" for s in model_stages
+            )
+            print(row)
+    print(f"{'='*60}")
