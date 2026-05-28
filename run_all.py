@@ -67,6 +67,9 @@ EXPERIMENTS = [
 LOG_FILE = OUTPUT_BASE / "run_all.log"
 _log_lock = threading.Lock()
 
+# evaluate 단계 전용 세마포어 (eval_gpus 지정 시 직렬화)
+_eval_sem = threading.Semaphore(1)
+
 
 # ── 로그 (스레드 안전) ────────────────────────────────────────────────────
 def log(msg: str):
@@ -152,6 +155,7 @@ def _execute_exp(
     gpus: str,
     skip_done: bool,
     only_eval: bool,
+    eval_gpus: str = None,
 ) -> bool:
     exp_key, sft_ep, rlaif_loss, sft_dep_key = exp
     py = sys.executable
@@ -224,17 +228,20 @@ def _execute_exp(
     if skip_done and eval_file.exists():
         log(f"  [SKIP] [{tag}] Evaluate")
     elif infer_file.exists():
-        _run(
-            [
-                py,
-                "pipeline/05_evaluate.py",
-                "--result_file",
-                str(infer_file),
-                "--out_tag",
-                f"{model}_{exp_key}",
-            ],
-            "Evaluate",
-        )
+        eval_cmd = [
+            py,
+            "pipeline/05_evaluate.py",
+            "--result_file",
+            str(infer_file),
+            "--out_tag",
+            f"{model}_{exp_key}",
+        ]
+        if eval_gpus:
+            # eval_gpus 지정 시: 해당 GPU 전체 사용, 직렬화 (judge 모델 크기 때문)
+            with _eval_sem:
+                run_cmd(eval_cmd, "Evaluate", eval_gpus, tag)
+        else:
+            _run(eval_cmd, "Evaluate")
         make_sample_md(model, exp_key)
 
     return True
@@ -248,6 +255,7 @@ def _run_exp_with_dep(
     dep_future,  # Future | None
     skip_done: bool,
     only_eval: bool,
+    eval_gpus: str = None,
 ) -> bool:
     """의존성 Future가 완료된 후 GPU를 획득해서 실험 실행."""
     if dep_future is not None:
@@ -261,7 +269,7 @@ def _run_exp_with_dep(
 
     gpus = gpu_pool.acquire()
     try:
-        return _execute_exp(model, exp, gpus, skip_done, only_eval)
+        return _execute_exp(model, exp, gpus, skip_done, only_eval, eval_gpus)
     finally:
         gpu_pool.release(gpus)
 
@@ -273,6 +281,7 @@ def run_parallel(
     skip_done: bool,
     only_eval: bool,
     exps: list,
+    eval_gpus: str = None,
 ):
     gpu_pool = GpuPool(gpus_str, gpus_per_job)
     n_total = len(models) * len(exps)
@@ -296,6 +305,7 @@ def run_parallel(
                     dep_future,
                     skip_done,
                     only_eval,
+                    eval_gpus,
                 )
                 futures[(model, exp_key)] = f
 
@@ -535,6 +545,10 @@ def main():
     parser.add_argument("--run_id", type=str, default=None)
     parser.add_argument("--skip_done", action="store_true", help="완료된 단계 건너뜀")
     parser.add_argument("--only_eval", action="store_true", help="Inference+Evaluate만")
+    parser.add_argument(
+        "--eval_gpus", type=str, default=None,
+        help="evaluate 전용 GPU (예: '4,5,6,7'). 지정 시 judge 모델이 이 GPU 전체를 사용하며 직렬 실행. 미지정 시 --gpus_per_job과 동일 슬롯 사용.",
+    )
     parser.add_argument("--summarize", action="store_true", help="결과 요약만 출력")
     parser.add_argument(
         "--experiments", nargs="+", choices=[e[0] for e in EXPERIMENTS], default=None
@@ -563,6 +577,8 @@ def main():
     log(f"모델:         {args.models}")
     log(f"실험:         {[e[0] for e in active_exps]}")
     log(f"GPU:          {args.gpus}  ({args.gpus_per_job}개/잡)")
+    if args.eval_gpus:
+        log(f"Eval GPU:     {args.eval_gpus}  (judge 직렬 실행)")
 
     run_parallel(
         args.models,
@@ -571,6 +587,7 @@ def main():
         args.skip_done,
         args.only_eval,
         active_exps,
+        args.eval_gpus,
     )
 
     log("\n모든 파이프라인 완료.")
