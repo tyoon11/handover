@@ -129,6 +129,12 @@ def stage_sft(base: str, steps: int = 3, n_samples: int = 8):
 
     args = types.SimpleNamespace(base=base, epochs=1, gpus=None, max_steps=steps)
 
+    # smoke test는 매 스텝마다 log()/save() 경로까지 검증 (시그니처 호환성 사전 검증)
+    import config as _cfg
+    _orig_sft_cfg = dict(_cfg.SFT_CONFIG)
+    _cfg.SFT_CONFIG["logging_steps"] = 1
+    _cfg.SFT_CONFIG["save_strategy"] = "no"  # 짧은 학습엔 save 불필요
+
     _orig = pd.read_pickle
     pd.read_pickle = lambda p: _orig(p).iloc[:n_samples]
     try:
@@ -140,6 +146,8 @@ def stage_sft(base: str, steps: int = 3, n_samples: int = 8):
         return False
     finally:
         pd.read_pickle = _orig
+        _cfg.SFT_CONFIG.clear()
+        _cfg.SFT_CONFIG.update(_orig_sft_cfg)
 
     print(f"\n{PASS} stage_sft 완료 → 02_sft_train.py 실행 가능")
     return True
@@ -165,6 +173,12 @@ def stage_rlaif(base: str, loss: str = "dpo", steps: int = 3, n_samples: int = 8
 
     args = types.SimpleNamespace(base=base, loss=loss, sft_ckpt=None, gpus=None, max_steps=steps)
 
+    # smoke test는 매 스텝마다 log()/save() 경로까지 검증 (시그니처 호환성 사전 검증)
+    import config as _cfg
+    _orig_rlaif_cfg = dict(_cfg.RLAIF_CONFIG)
+    _cfg.RLAIF_CONFIG["logging_steps"] = 1
+    _cfg.RLAIF_CONFIG["save_strategy"] = "no"
+
     _orig = pd.read_pickle
     pd.read_pickle = lambda p: _orig(p).iloc[:n_samples]
     try:
@@ -176,6 +190,8 @@ def stage_rlaif(base: str, loss: str = "dpo", steps: int = 3, n_samples: int = 8
         return False
     finally:
         pd.read_pickle = _orig
+        _cfg.RLAIF_CONFIG.clear()
+        _cfg.RLAIF_CONFIG.update(_orig_rlaif_cfg)
 
     print(f"\n{PASS} stage_rlaif 완료 → 03_rlaif_train.py 실행 가능 ({loss})")
     return True

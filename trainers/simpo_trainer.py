@@ -1157,20 +1157,23 @@ class SimPOTrainer(Trainer):
 
         return initial_output
 
-    def log(self, logs: Dict[str, float]) -> None:
+    def log(self, logs: Dict[str, float], *args, **kwargs) -> None:
         """
         Log `logs` on the various objects watching training, including stored metrics.
-
-        Args:
-            logs (`Dict[str, float]`):
-                The values to log.
+        새 transformers는 log(logs, start_time)로 호출하므로 *args/**kwargs로 통과.
         """
-        # logs either has 'loss' or 'eval_loss'
         train_eval = "train" if "loss" in logs else "eval"
-        # Add averaged stored metrics to logs
         for key, metrics in self._stored_metrics[train_eval].items():
             logs[key] = torch.tensor(metrics).mean().item()
         del self._stored_metrics[train_eval]
+        # super().log() 시그니처에 맞춰 인자 전달
+        import inspect as _inspect
+        try:
+            _sig = _inspect.signature(super().log)
+            if len(_sig.parameters) >= 2:  # logs + start_time 등
+                return super().log(logs, *args, **kwargs)
+        except (TypeError, ValueError):
+            pass
         return super().log(logs)
 
     @wraps(Trainer.push_to_hub)
