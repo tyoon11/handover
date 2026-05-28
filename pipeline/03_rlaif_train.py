@@ -266,9 +266,24 @@ def train(args):
 
     print("\n학습 시작...")
     trainer.train()
-    trainer.save_model(str(output_dir / "final"))
-    tokenizer.save_pretrained(str(output_dir / "final"))
-    print(f"\n[완료] 저장: {output_dir / 'final'}")
+
+    final_dir = output_dir / "final"
+    # PEFT adapter 명시적 저장 (trainer.save_model이 일부 TRL 버전에서 누락하는 경우 방지)
+    if hasattr(trainer.model, "peft_config"):
+        trainer.model.save_pretrained(str(final_dir))
+    else:
+        trainer.save_model(str(final_dir))
+    tokenizer.save_pretrained(str(final_dir))
+
+    # 저장 검증
+    saved_files = list(final_dir.glob("*"))
+    has_adapter = (final_dir / "adapter_config.json").exists()
+    has_full = (final_dir / "config.json").exists()
+    if not (has_adapter or has_full):
+        raise RuntimeError(
+            f"[저장 실패] {final_dir}: 모델 config 없음. files={[f.name for f in saved_files]}"
+        )
+    print(f"\n[완료] 저장: {final_dir}  (PEFT={has_adapter}, files={len(saved_files)})")
 
 
 if __name__ == "__main__":

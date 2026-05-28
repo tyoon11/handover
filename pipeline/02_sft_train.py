@@ -323,9 +323,29 @@ def train(args):
     )
     print("\n학습 시작...")
     trainer.train()
-    trainer.save_model(str(output_dir / "final"))
-    tokenizer.save_pretrained(str(output_dir / "final"))
-    print(f"\n[완료] 저장: {output_dir / 'final'}")
+
+    final_dir = output_dir / "final"
+    # PEFT 모델은 trainer.save_model이 adapter를 못 저장하는 경우가 있음.
+    # 명시적으로 model.save_pretrained 호출 (PEFT/일반 모두 동작)
+    if hasattr(trainer.model, "peft_config"):
+        trainer.model.save_pretrained(str(final_dir))
+    else:
+        trainer.save_model(str(final_dir))
+    tokenizer.save_pretrained(str(final_dir))
+
+    # 저장 검증: 추론에서 로드 가능한 파일이 실제로 있는지 확인
+    saved_files = list(final_dir.glob("*"))
+    has_adapter = (final_dir / "adapter_config.json").exists()
+    has_full = (final_dir / "config.json").exists()
+    has_tokenizer = (final_dir / "tokenizer_config.json").exists()
+    if not (has_adapter or has_full):
+        raise RuntimeError(
+            f"[저장 실패] {final_dir}에 adapter_config.json/config.json 모두 없음. "
+            f"실제 파일: {[f.name for f in saved_files]}"
+        )
+    if not has_tokenizer:
+        raise RuntimeError(f"[저장 실패] {final_dir}에 tokenizer_config.json 없음")
+    print(f"\n[완료] 저장: {final_dir}  (PEFT={has_adapter}, files={len(saved_files)})")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

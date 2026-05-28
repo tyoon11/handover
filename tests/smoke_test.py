@@ -129,17 +129,30 @@ def stage_sft(base: str, steps: int = 3, n_samples: int = 8):
 
     args = types.SimpleNamespace(base=base, epochs=1, gpus=None, max_steps=steps)
 
-    # smoke test는 매 스텝마다 log()/save() 경로까지 검증 (시그니처 호환성 사전 검증)
+    # smoke test는 매 스텝마다 log() 경로까지 검증 (시그니처 호환성 사전 검증)
+    # save_strategy="no"로 epoch 중간 저장은 비활성화 (final save는 명시 호출이라 영향 없음)
     import config as _cfg
     _orig_sft_cfg = dict(_cfg.SFT_CONFIG)
     _cfg.SFT_CONFIG["logging_steps"] = 1
-    _cfg.SFT_CONFIG["save_strategy"] = "no"  # 짧은 학습엔 save 불필요
+    _cfg.SFT_CONFIG["save_strategy"] = "no"
 
     _orig = pd.read_pickle
     pd.read_pickle = lambda p: _orig(p).iloc[:n_samples]
     try:
         sft_mod.train(args)
         print(f"  {PASS} {steps} steps 학습 (실제 Trainer+JudgeAugmentedCollator)")
+
+        # save 검증: final/ 에 추론용 파일이 실제로 생성됐는지 확인
+        final_dir = _cfg.SFT_OUT / f"{base}_1ep" / "final"
+        has_adapter = (final_dir / "adapter_config.json").exists()
+        has_tokenizer = (final_dir / "tokenizer_config.json").exists()
+        if not has_adapter:
+            print(f"  {FAIL} adapter_config.json 누락: {final_dir}")
+            return False
+        if not has_tokenizer:
+            print(f"  {FAIL} tokenizer_config.json 누락: {final_dir}")
+            return False
+        print(f"  {PASS} 저장 검증: adapter+tokenizer 파일 모두 존재")
     except Exception as e:
         print(f"  {FAIL} {steps} steps 학습: {type(e).__name__}: {e}")
         traceback.print_exc()
@@ -173,7 +186,7 @@ def stage_rlaif(base: str, loss: str = "dpo", steps: int = 3, n_samples: int = 8
 
     args = types.SimpleNamespace(base=base, loss=loss, sft_ckpt=None, gpus=None, max_steps=steps)
 
-    # smoke test는 매 스텝마다 log()/save() 경로까지 검증 (시그니처 호환성 사전 검증)
+    # smoke test는 매 스텝마다 log() 경로까지 검증 (시그니처 호환성 사전 검증)
     import config as _cfg
     _orig_rlaif_cfg = dict(_cfg.RLAIF_CONFIG)
     _cfg.RLAIF_CONFIG["logging_steps"] = 1
@@ -184,6 +197,14 @@ def stage_rlaif(base: str, loss: str = "dpo", steps: int = 3, n_samples: int = 8
     try:
         rlaif_mod.train(args)
         print(f"  {PASS} {steps} steps 학습 (실제 {loss.upper()}Trainer)")
+
+        # save 검증
+        final_dir = _cfg.RLAIF_OUT / f"{base}_raw_{loss}" / "final"
+        has_adapter = (final_dir / "adapter_config.json").exists()
+        if not has_adapter:
+            print(f"  {FAIL} adapter_config.json 누락: {final_dir}")
+            return False
+        print(f"  {PASS} 저장 검증: adapter 파일 존재")
     except Exception as e:
         print(f"  {FAIL} {steps} steps 학습: {type(e).__name__}: {e}")
         traceback.print_exc()
