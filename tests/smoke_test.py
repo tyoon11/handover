@@ -361,12 +361,154 @@ def stage_eval_inline(n: int = 2):
     return False
 
 
+# ── Stage 5: Batch Eval (05_evaluate.py --result_files) ──────────────────
+def stage_batch_eval(n_files: int = 2, n_samples: int = 2):
+    """05_evaluate.py가 judge 1회 로드로 N개 파일을 batch 처리하는지 검증."""
+    header(f"Stage: batch_eval — {n_files}개 파일을 judge 1회 로드로 평가")
+    import tempfile, subprocess, json, gc
+    import torch
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    tmpdir = tempfile.mkdtemp(prefix="smoke_batch_eval_")
+    files = []
+    for i in range(n_files):
+        d = Path(tmpdir) / f"fake_model_{i}"
+        d.mkdir(parents=True)
+        f = d / "gold_results.jsonl"
+        with open(f, "w", encoding="utf-8") as fp:
+            for j in range(n_samples):
+                fp.write(json.dumps({
+                    "idx": j, "sid": -1,
+                    "generated": "SpO2 93% → O2 보충 유지.",
+                }, ensure_ascii=False) + "\n")
+        files.append(str(f))
+
+    cmd = [sys.executable, str(Path(__file__).resolve().parent.parent / "pipeline" / "05_evaluate.py"),
+           "--result_files"] + files
+    result = ok("batch eval subprocess", lambda: subprocess.run(cmd, check=True, capture_output=True, text=True))
+    if result is None:
+        return False
+
+    # judge 1회 로드 확인 — "Judge 모델 로드" 라인이 정확히 1회만 출력
+    load_lines = [l for l in result.stdout.splitlines() if "Judge 모델 로드" in l]
+    print(f"  Judge 로드 횟수: {len(load_lines)} (예상 1)")
+    if len(load_lines) != 1:
+        print(f"  {FAIL} judge가 {len(load_lines)}회 로드됨 — batch 아님")
+        return False
+
+    print(f"\n{PASS} stage_batch_eval 완료 → 05_evaluate.py --result_files 정상")
+    return True
+
+
+# ── Stage 6: Orchestrator (run_all.py 2단계 흐름) ────────────────────────
+def stage_orchestrator():
+    """run_all.py의 Phase1(병렬 학습+추론) + Phase2(batch eval) 흐름을 mock subprocess로 검증."""
+    header("Stage: orchestrator — run_all.py 2단계 흐름 (GPU 불필요)")
+    import importlib.util, threading, time, tempfile, shutil
+    from unittest.mock import patch
+
+    spec = importlib.util.spec_from_file_location(
+        "run_all", Path(__file__).resolve().parent.parent / "run_all.py"
+    )
+    run_all = importlib.util.module_from_spec(spec)
+    ok("run_all 로드", lambda: spec.loader.exec_module(run_all))
+
+    # 임시 출력 디렉토리로 INFER_OUT/EVAL_OUT 우회
+    tmpbase = Path(tempfile.mkdtemp(prefix="smoke_orch_"))
+    orig_infer = run_all.INFER_OUT
+    orig_eval = run_all.EVAL_OUT
+    run_all.INFER_OUT = tmpbase / "infer"
+    run_all.EVAL_OUT = tmpbase / "eval"
+
+    calls = []
+    call_lock = threading.Lock()
+
+    def fake_run_cmd(cmd, desc, gpus, tag=""):
+        with call_lock:
+            calls.append((time.time(), desc, gpus, tag, list(cmd)))
+        time.sleep(0.1)
+        # infer 호출 후 결과 파일 생성 (Phase 2가 픽업하려면 필요)
+        cmd_str = " ".join(str(c) for c in cmd)
+        if "04_inference.py" in cmd_str:
+            ix = cmd.index("--out_tag")
+            out_tag = cmd[ix + 1]
+            f = run_all.INFER_OUT / out_tag / "gold_results.jsonl"
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text('{"idx":0,"sid":-1,"generated":"x"}\n')
+        elif "05_evaluate.py" in cmd_str:
+            # batch eval 출력 파일도 생성 (make_sample_md용)
+            idx_rf = cmd.index("--result_files")
+            for rf in cmd[idx_rf + 1:]:
+                tag_name = Path(rf).parent.name
+                out_f = run_all.EVAL_OUT / tag_name / "gold_results_scores.jsonl"
+                out_f.parent.mkdir(parents=True, exist_ok=True)
+                out_f.write_text('{"idx":0,"brevity_score":3,"critical_score":3,"sum_score":6,"sid":-1,"generated":"x"}\n')
+        return True
+
+    try:
+        with patch.object(run_all, "run_cmd", fake_run_cmd), \
+             patch.object(run_all, "make_sample_md", lambda *a, **k: None):
+            run_all.run_parallel(
+                models=["llama", "qwen"],
+                gpus_str="4,5,6,7",
+                gpus_per_job=2,
+                skip_done=False,
+                only_eval=False,
+                exps=[("raw", None, None, None)],
+                eval_gpus="4,5,6,7",
+            )
+    finally:
+        run_all.INFER_OUT = orig_infer
+        run_all.EVAL_OUT = orig_eval
+        shutil.rmtree(tmpbase, ignore_errors=True)
+
+    infer_calls = [c for c in calls if "Inference" in c[1]]
+    eval_calls = [c for c in calls if "Evaluate" in c[1]]
+
+    print(f"  Phase 1 — 추론 호출: {len(infer_calls)}회 (예상 2: llama+qwen)")
+    print(f"  Phase 2 — eval 호출:  {len(eval_calls)}회 (예상 1: batch)")
+
+    if len(eval_calls) != 1:
+        print(f"  {FAIL} eval이 batch로 묶이지 않음 ({len(eval_calls)}회)")
+        return False
+    if len(infer_calls) != 2:
+        print(f"  {FAIL} 추론 호출 횟수 불일치")
+        return False
+
+    last_infer_t = max(c[0] for c in infer_calls) if infer_calls else 0
+    if eval_calls[0][0] < last_infer_t:
+        print(f"  {FAIL} Phase 분리 깨짐 (eval이 infer 완료 전 시작)")
+        return False
+
+    if "--result_files" not in eval_calls[0][4]:
+        print(f"  {FAIL} eval이 --result_files 안 씀")
+        return False
+
+    # GPU 충돌 검사 — eval 동안 다른 잡이 같은 GPU 점유했는지
+    eval_start, eval_end = eval_calls[0][0], eval_calls[0][0] + 0.1
+    eval_gpus_set = set(eval_calls[0][2].split(","))
+    for t, desc, gpus, tag, _ in calls:
+        if desc == eval_calls[0][1]:
+            continue
+        if eval_start <= t <= eval_end:
+            overlap = eval_gpus_set & set(gpus.split(","))
+            if overlap:
+                print(f"  {FAIL} eval 중 {tag}/{desc}가 GPU {overlap} 사용")
+                return False
+
+    print(f"  {PASS} Phase 1 (병렬) → Phase 2 (batch eval) 순서/GPU 모두 정상")
+    return True
+
+
 # ── main ──────────────────────────────────────────────────────────────────
 ALL_MODELS = ["llama", "qwen", "gemma4", "qwen35", "hari"]
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="파이프라인 단계별 smoke test")
-    parser.add_argument("--stage", choices=["data", "sft", "rlaif", "infer", "eval"], default=None)
+    parser.add_argument("--stage", choices=["data", "sft", "rlaif", "infer", "eval", "batch_eval", "orchestrator"], default=None)
     parser.add_argument("--all", action="store_true", help="모든 단계 순서대로 실행")
     parser.add_argument(
         "--models", nargs="+",
@@ -406,9 +548,15 @@ if __name__ == "__main__":
         if args.all or args.stage == "infer":
             results[model]["infer"] = stage_infer(model, args.n)
 
-    # eval 단계는 모델 무관 (judge 모델 고정) — 한 번만
+    # eval / batch_eval / orchestrator 단계는 모델 무관 — 한 번만
     if args.all or args.stage == "eval":
         results.setdefault("_common", {})["eval"] = stage_eval_inline(args.n)
+
+    if args.all or args.stage == "batch_eval":
+        results.setdefault("_common", {})["batch_eval"] = stage_batch_eval(n_files=2, n_samples=args.n)
+
+    if args.all or args.stage == "orchestrator":
+        results.setdefault("_common", {})["orchestrator"] = stage_orchestrator()
 
     # ── 결과 요약 테이블 ──────────────────────────────────────────────────
     print(f"\n{'='*60}")

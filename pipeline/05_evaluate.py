@@ -352,41 +352,28 @@ def evaluate_pairwise(args):
         print(f"  저장: {out_file}")
 
 
-def evaluate(args):
-    if args.result_file_b:
-        evaluate_pairwise(args)
-        return
+def _load_eval_deps(judge_model_id: str):
+    """Judge 모델, gold_df, vital_map을 1회만 로드 (batch 평가용)."""
+    gold_df = pd.read_pickle(GOLD_PKL)
+    with open(VITAL_MAP_PKL, "rb") as f:
+        vital_map = pickle.load(f)
+    judge_model, judge_tok = load_judge_model(judge_model_id)
+    return judge_model, judge_tok, gold_df, vital_map
 
-    result_file = Path(args.result_file)
-    tag = args.out_tag if args.out_tag else result_file.parent.name
+
+def _evaluate_single(result_file, out_tag, judge_model, judge_tok, gold_df, vital_map, args):
+    """파일 1개 평가 (judge/gold/vital은 미리 로드된 것 재사용)."""
+    result_file = Path(result_file)
+    tag = out_tag if out_tag else result_file.parent.name
     out_dir = EVAL_OUT / tag
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / result_file.name.replace(".jsonl", "_scores.jsonl")
 
-    print(f"\n[Evaluate]")
-    print(f"  결과 파일: {result_file}")
-    print(f"  출력:      {out_file}")
+    print(f"\n[Evaluate] {result_file} → {out_file}")
 
-    # 결과 로드
     with open(result_file, encoding="utf-8") as f:
         results = [json.loads(l) for l in f]
-    print(f"  샘플 수:  {len(results)}건")
-
-    # generated 필드 없는 구버전 jsonl 호환
-    # 구버전: "generated" 필드가 raw 출력 (thinking 포함 가능)
-    # 신버전: "generated" = 정제본, "generated_raw" = 원본
-    has_raw_field = any("generated_raw" in r for r in results[:3])
-    print(
-        f"  포맷: {'신버전 (generated_raw 있음)' if has_raw_field else '구버전 (generated만 있음)'}"
-    )
-
-    # Gold 데이터 로드 (EMR 텍스트 재구성용)
-    gold_df = pd.read_pickle(GOLD_PKL)
-    with open(VITAL_MAP_PKL, "rb") as f:
-        vital_map = pickle.load(f)
-
-    # Judge 모델
-    judge_model, judge_tok = load_judge_model(args.judge_model or EVAL_JUDGE_MODEL)
+    print(f"  샘플 수: {len(results)}건")
 
     scored = []
     skipped = 0
@@ -451,6 +438,25 @@ def evaluate(args):
     # ── SCALE 평가 (--scale 플래그 지정 시) ──────────────────────────────
     if args.scale:
         run_scale_eval(scored, out_dir, result_file)
+
+
+def evaluate(args):
+    """단일 파일 평가 (구 인터페이스 — judge 모델 매번 로드)."""
+    if args.result_file_b:
+        evaluate_pairwise(args)
+        return
+    judge, tok, gold_df, vmap = _load_eval_deps(args.judge_model or EVAL_JUDGE_MODEL)
+    _evaluate_single(args.result_file, args.out_tag, judge, tok, gold_df, vmap, args)
+
+
+def evaluate_batch(args):
+    """다중 파일 평가 — judge 모델 1회 로드, 모든 result_files 순회."""
+    judge, tok, gold_df, vmap = _load_eval_deps(args.judge_model or EVAL_JUDGE_MODEL)
+    print(f"\n[Batch Evaluate] {len(args.result_files)}개 파일 처리 시작")
+    for i, rf in enumerate(args.result_files):
+        print(f"\n──── [{i+1}/{len(args.result_files)}] ────")
+        out_tag = Path(rf).parent.name  # "llama_raw" 등 자동 추출
+        _evaluate_single(rf, out_tag, judge, tok, gold_df, vmap, args)
 
 
 def run_scale_eval(scored: list, out_dir: Path, result_file: Path):
@@ -608,6 +614,12 @@ if __name__ == "__main__":
         help="04_inference.py 출력 jsonl 파일 경로 (모델 A)",
     )
     parser.add_argument(
+        "--result_files",
+        nargs="+",
+        default=None,
+        help="여러 추론 결과를 judge 1회 로드로 일괄 평가. out_tag는 부모폴더명에서 자동 추출.",
+    )
+    parser.add_argument(
         "--result_file_b",
         type=str,
         default=None,
@@ -641,7 +653,9 @@ if __name__ == "__main__":
 
     if args.compare:
         compare_models(args.compare[0], args.compare[1])
+    elif args.result_files:
+        evaluate_batch(args)
     elif args.result_file:
         evaluate(args)
     else:
-        parser.error("--result_file 또는 --compare 중 하나를 지정하세요.")
+        parser.error("--result_file / --result_files / --compare 중 하나를 지정하세요.")

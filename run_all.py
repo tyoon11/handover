@@ -67,9 +67,6 @@ EXPERIMENTS = [
 LOG_FILE = OUTPUT_BASE / "run_all.log"
 _log_lock = threading.Lock()
 
-# evaluate 단계 전용 세마포어 (eval_gpus 지정 시 직렬화)
-_eval_sem = threading.Semaphore(1)
-
 
 # ── 로그 (스레드 안전) ────────────────────────────────────────────────────
 def log(msg: str):
@@ -155,8 +152,8 @@ def _execute_exp(
     gpus: str,
     skip_done: bool,
     only_eval: bool,
-    eval_gpus: str = None,
 ) -> bool:
+    """Phase 1: 학습 + 추론까지만 실행. eval은 Phase 2에서 batch로 처리."""
     exp_key, sft_ep, rlaif_loss, sft_dep_key = exp
     py = sys.executable
     tag = f"{model}/{exp_key}"
@@ -223,27 +220,7 @@ def _execute_exp(
         if not ok:
             return False
 
-    # ── Evaluate ─────────────────────────────────────────────────────────
-    eval_file = _eval_path(model, exp_key)
-    if skip_done and eval_file.exists():
-        log(f"  [SKIP] [{tag}] Evaluate")
-    elif infer_file.exists():
-        eval_cmd = [
-            py,
-            "pipeline/05_evaluate.py",
-            "--result_file",
-            str(infer_file),
-            "--out_tag",
-            f"{model}_{exp_key}",
-        ]
-        if eval_gpus:
-            # eval_gpus 지정 시: 해당 GPU 전체 사용, 직렬화 (judge 모델 크기 때문)
-            with _eval_sem:
-                run_cmd(eval_cmd, "Evaluate", eval_gpus, tag)
-        else:
-            _run(eval_cmd, "Evaluate")
-        make_sample_md(model, exp_key)
-
+    # Evaluate는 Phase 2에서 batch로 처리 — 여기서는 추론까지만
     return True
 
 
@@ -255,9 +232,8 @@ def _run_exp_with_dep(
     dep_future,  # Future | None
     skip_done: bool,
     only_eval: bool,
-    eval_gpus: str = None,
 ) -> bool:
-    """의존성 Future가 완료된 후 GPU를 획득해서 실험 실행."""
+    """의존성 Future가 완료된 후 GPU를 획득해서 학습+추론 실행 (Phase 1)."""
     if dep_future is not None:
         try:
             dep_ok = dep_future.result()
@@ -269,7 +245,7 @@ def _run_exp_with_dep(
 
     gpus = gpu_pool.acquire()
     try:
-        return _execute_exp(model, exp, gpus, skip_done, only_eval, eval_gpus)
+        return _execute_exp(model, exp, gpus, skip_done, only_eval)
     finally:
         gpu_pool.release(gpus)
 
@@ -283,39 +259,69 @@ def run_parallel(
     exps: list,
     eval_gpus: str = None,
 ):
+    """
+    Phase 1: 학습+추론 병렬 (gpu_pool 사용, judge 무관)
+    Phase 2: judge 1회 로드 후 모든 추론 결과를 batch로 평가
+    """
     gpu_pool = GpuPool(gpus_str, gpus_per_job)
     n_total = len(models) * len(exps)
-    log(f"총 {n_total}개 실험 (모델 {len(models)}개 × 실험 {len(exps)}개)")
 
-    # 모든 잡을 한꺼번에 제출 (GPU pool이 동시 실행 수를 제어)
+    # ── Phase 1: 학습 + 추론 (병렬) ──────────────────────────────────────
+    log(f"\n{'='*60}\n=== Phase 1: 학습 + 추론 ({n_total}개 잡, 병렬) ===\n{'='*60}")
+
     with ThreadPoolExecutor(max_workers=n_total) as executor:
         futures = {}  # (model, exp_key) → Future
-
         for model in models:
             for exp in exps:
                 exp_key = exp[0]
                 dep_key = exp[3]
                 dep_future = futures.get((model, dep_key)) if dep_key else None
-
                 f = executor.submit(
                     _run_exp_with_dep,
-                    model,
-                    exp,
-                    gpu_pool,
-                    dep_future,
-                    skip_done,
-                    only_eval,
-                    eval_gpus,
+                    model, exp, gpu_pool, dep_future, skip_done, only_eval,
                 )
                 futures[(model, exp_key)] = f
 
-        # 완료 대기 및 결과 수집
         for (model, exp_key), f in futures.items():
             try:
                 ok = f.result()
-                log(f"[완료] {model}/{exp_key}: {'✓' if ok else '✗'}")
+                log(f"[Phase1 완료] {model}/{exp_key}: {'✓' if ok else '✗'}")
             except Exception as e:
-                log(f"[오류] {model}/{exp_key}: {e}")
+                log(f"[Phase1 오류] {model}/{exp_key}: {e}")
+
+    # ── Phase 2: Judge 1회 로드 + batch 평가 ───────────────────────────
+    log(f"\n{'='*60}\n=== Phase 2: Judge 평가 (모델 1회 로드) ===\n{'='*60}")
+
+    infer_files = []
+    for m in models:
+        for exp in exps:
+            exp_key = exp[0]
+            infer_f = _infer_path(m, exp_key)
+            eval_f = _eval_path(m, exp_key)
+            if not infer_f.exists():
+                log(f"  [SKIP eval] {m}/{exp_key}: 추론 결과 없음")
+                continue
+            if skip_done and eval_f.exists():
+                log(f"  [SKIP eval] {m}/{exp_key}: 이미 평가 완료")
+                continue
+            infer_files.append(str(infer_f))
+
+    if not infer_files:
+        log("  평가할 파일 없음 — Phase 2 건너뜀")
+        return
+
+    eval_gpu_str = eval_gpus or gpus_str
+    log(f"  {len(infer_files)}개 파일 batch 평가 (GPU: {eval_gpu_str})")
+    run_cmd(
+        [sys.executable, "pipeline/05_evaluate.py", "--result_files"] + infer_files,
+        "Batch Evaluate", eval_gpu_str, "all",
+    )
+
+    # 샘플 MD 생성
+    for m in models:
+        for exp in exps:
+            if _eval_path(m, exp[0]).exists():
+                make_sample_md(m, exp[0])
 
 
 # ── 샘플 MD 생성 ──────────────────────────────────────────────────────────
