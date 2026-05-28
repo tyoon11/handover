@@ -137,7 +137,7 @@ SFT_CONFIG = dict(
     per_device_train_batch_size=2,
     gradient_accumulation_steps=16,  # 원본 train_jsft.ipynb 기준
     learning_rate=1e-6,  # 원본 train_jsft.ipynb 기준
-    warmup_ratio=0.1,  # 원본 train_jsft.ipynb 기준
+    warmup_steps=20,  # 원본 warmup_ratio=0.1 → v5.2 제거 예정, 절대값으로 교체
     lr_scheduler_type="cosine",
     bf16=True,
     logging_steps=10,
