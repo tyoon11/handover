@@ -135,9 +135,9 @@ LORA_TARGET_MODULES_GEMMA4 = r"model\.language_model\.layers\.\d+\.(self_attn\.(
 SFT_CONFIG = dict(
     num_train_epochs=3,
     per_device_train_batch_size=2,
-    gradient_accumulation_steps=16,  # 원본 train_jsft.ipynb 기준
-    learning_rate=1e-6,  # 원본 train_jsft.ipynb 기준
-    warmup_steps=20,  # 원본 warmup_ratio=0.1 → v5.2 제거 예정, 절대값으로 교체
+    gradient_accumulation_steps=4,  # 원본 llama_jsft_3epoch.yaml 기준
+    learning_rate=2e-5,             # 원본 llama_jsft_3epoch.yaml 기준
+    warmup_steps=50,                # 원본 warmup_ratio=0.03 ≈ 3% (2GPU 기준 ~1539 steps)
     lr_scheduler_type="cosine",
     bf16=True,
     logging_steps=10,
@@ -147,13 +147,15 @@ SFT_CONFIG = dict(
 
 # ── RLAIF (DPO/SimPO) 설정 ────────────────────────────────────────────────
 RLAIF_CONFIG = dict(
-    loss_type="sigmoid",  # "dpo" or "simpo"
+    loss_type="sigmoid",
     num_train_epochs=3,
-    per_device_train_batch_size=1,
-    gradient_accumulation_steps=8,
+    per_device_train_batch_size=1,    # OOM 방지용 (원본 2 → 1)
+    gradient_accumulation_steps=8,    # per_device 절반 보상 (원본 4 → 8, effective batch 동일)
     learning_rate=5e-6,
     beta=0.1,
     max_length=2048,
+    lr_scheduler_type="constant_with_warmup",  # 원본 llama_dpo.yaml 기준
+    warmup_steps=50,                            # 원본 warmup_ratio=0.1 ≈ 10% (2GPU 기준 ~513 steps)
     bf16=True,
     logging_steps=10,
     save_strategy="epoch",
