@@ -295,7 +295,11 @@ def train(args):
 
     # TrainingArguments (원본은 Trainer + TrainingArguments 사용)
     cfg = dict(SFT_CONFIG)
-    cfg["num_train_epochs"] = args.epochs
+    if getattr(args, "max_steps", None) is not None:
+        cfg["max_steps"] = args.max_steps
+        cfg.pop("num_train_epochs", None)
+    else:
+        cfg["num_train_epochs"] = args.epochs
     train_args = TrainingArguments(
         output_dir=str(output_dir),
         seed=42,
@@ -334,6 +338,7 @@ if __name__ == "__main__":
         "--base", choices=["llama", "qwen", "gemma4", "qwen35", "hari"], default="llama"
     )
     parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--max_steps", type=int, default=None, help="smoke test용 최대 step 수 (지정 시 epochs 무시)")
     parser.add_argument(
         "--gpus", type=str, default=None, help="사용할 GPU 번호. 예: '0' 또는 '0,1,2,3'"
     )

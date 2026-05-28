@@ -111,199 +111,54 @@ def stage_data():
 
 # ── Stage 1: SFT 3 steps ──────────────────────────────────────────────────
 def stage_sft(base: str, steps: int = 3, n_samples: int = 8):
+    """02_sft_train.py의 train() 함수를 직접 호출해서 실제 코드 경로를 검증."""
     header(f"Stage: sft — {base} · {steps} steps · {n_samples} samples")
-    import torch
-    from datasets import Dataset
-    from transformers import AutoTokenizer, AutoModelForCausalLM
-    from peft import LoraConfig, get_peft_model
-    from trl import SFTTrainer, SFTConfig
-    from config import (
-        SYNTH_PKL, VITAL_MAP_PKL, SFT_MODELS,
-        LORA_R, LORA_ALPHA, LORA_DROPOUT, LORA_TARGET_MODULES, LORA_TARGET_MODULES_GEMMA4,
-        SYSTEM_PROMPT, build_user_prompt, build_emr_text,
+    import types, importlib.util, pandas as pd
+
+    spec = importlib.util.spec_from_file_location(
+        "sft_train", Path(__file__).resolve().parent.parent / "pipeline" / "02_sft_train.py"
     )
+    sft_mod = importlib.util.module_from_spec(spec)
+    ok("02_sft_train 로드", lambda: spec.loader.exec_module(sft_mod))
 
-    model_id = str(SFT_MODELS[base])
-    print(f"\n  모델: {model_id}")
-    print(f"  GPU: {torch.cuda.device_count()}개")
+    args = types.SimpleNamespace(base=base, epochs=1, gpus=None, max_steps=steps)
 
-    # 데이터
-    print("\n[1] 데이터")
-    df = ok("SYNTH_PKL", lambda: pd.read_pickle(SYNTH_PKL).iloc[:n_samples])
-    vmap = ok("VITAL_MAP_PKL", lambda: pickle.load(open(VITAL_MAP_PKL, "rb")))
-    if df is None or vmap is None:
-        return False
+    _orig = pd.read_pickle
+    pd.read_pickle = lambda p: _orig(p).iloc[:n_samples]
+    try:
+        result = ok(f"{steps} steps 학습 (실제 Trainer+JudgeAugmentedCollator)", lambda: sft_mod.train(args))
+    finally:
+        pd.read_pickle = _orig
 
-    tokenizer = ok("토크나이저", lambda: AutoTokenizer.from_pretrained(model_id, trust_remote_code=True))
-    if tokenizer is None:
-        return False
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    texts = []
-    for _, row in df.iterrows():
-        emr = build_emr_text(row)
-        try:
-            v = row["수술 ID"]
-            sid = int(v.iloc[0]) if hasattr(v, "iloc") else int(v)
-        except Exception:
-            sid = -1
-        vital = vmap.get(sid, "")
-        chosen = str(row.get("chosen", "특이사항 없음"))
-        user = build_user_prompt(emr, vital)
-        msgs = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user},
-            {"role": "assistant", "content": chosen},
-        ]
-        texts.append(tokenizer.apply_chat_template(msgs, tokenize=False))
-
-    dataset = ok("Dataset", lambda: Dataset.from_dict({"text": texts}))
-    if dataset is None:
-        return False
-
-    # 모델
-    print("\n[2] 모델 & LoRA")
-    model = ok("모델 로드", lambda: AutoModelForCausalLM.from_pretrained(
-        model_id, dtype=torch.bfloat16, device_map="auto",
-        low_cpu_mem_usage=True, trust_remote_code=True,
-    ))
-    if model is None:
-        return False
-
-    _targets = LORA_TARGET_MODULES_GEMMA4 if base == "gemma4" else LORA_TARGET_MODULES
-    model = ok("LoRA", lambda: get_peft_model(model, LoraConfig(
-        r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT,
-        target_modules=_targets, bias="none", task_type="CAUSAL_LM",
-    )))
-    if model is None:
-        return False
-    model.config.use_cache = False
-    model.print_trainable_parameters()
-
-    mem = sum(torch.cuda.memory_allocated(i) for i in range(torch.cuda.device_count())) / 1e9
-    print(f"  GPU 메모리(로드 후): {mem:.1f}GB")
-
-    # 학습
-    print(f"\n[3] 학습 {steps} steps")
-    cfg = ok("SFTConfig", lambda: SFTConfig(
-        output_dir="/tmp/smoke_sft",
-        max_steps=steps, per_device_train_batch_size=1,
-        gradient_accumulation_steps=1, learning_rate=2e-4,
-        bf16=True, logging_steps=1,
-        dataset_text_field="text", report_to="none", seed=42,
-    ))
-    trainer = ok("SFTTrainer", lambda: SFTTrainer(
-        model=model, args=cfg, train_dataset=dataset, processing_class=tokenizer,
-    ))
-    if trainer is None:
-        return False
-
-    result = ok(f"{steps} steps 학습", lambda: trainer.train())
     if result is None:
         return False
-
-    mem2 = sum(torch.cuda.memory_allocated(i) for i in range(torch.cuda.device_count())) / 1e9
-    print(f"  GPU 메모리(학습 후): {mem2:.1f}GB")
     print(f"\n{PASS} stage_sft 완료 → 02_sft_train.py 실행 가능")
     return True
 
 
-# ── Stage 2: RLAIF (DPO) 3 steps ─────────────────────────────────────────
+# ── Stage 2: RLAIF (DPO/SimPO) 3 steps ──────────────────────────────────
 def stage_rlaif(base: str, loss: str = "dpo", steps: int = 3, n_samples: int = 8):
+    """03_rlaif_train.py의 train() 함수를 직접 호출해서 실제 코드 경로를 검증."""
     header(f"Stage: rlaif — {base} · {loss} · {steps} steps")
-    import torch
-    from datasets import Dataset
-    from transformers import AutoTokenizer, AutoModelForCausalLM
-    from peft import LoraConfig, get_peft_model
-    from config import (
-        SYNTH_PKL, VITAL_MAP_PKL, SFT_MODELS,
-        LORA_R, LORA_ALPHA, LORA_DROPOUT, LORA_TARGET_MODULES, LORA_TARGET_MODULES_GEMMA4,
-        RLAIF_CONFIG, SYSTEM_PROMPT, build_user_prompt, build_emr_text,
+    import types, importlib.util, pandas as pd
+
+    spec = importlib.util.spec_from_file_location(
+        "rlaif_train", Path(__file__).resolve().parent.parent / "pipeline" / "03_rlaif_train.py"
     )
+    rlaif_mod = importlib.util.module_from_spec(spec)
+    ok("03_rlaif_train 로드", lambda: spec.loader.exec_module(rlaif_mod))
 
-    model_id = str(SFT_MODELS[base])
-    print(f"\n  모델: {model_id}\n  GPU: {torch.cuda.device_count()}개")
+    args = types.SimpleNamespace(base=base, loss=loss, sft_ckpt=None, gpus=None, max_steps=steps)
 
-    df = ok("SYNTH_PKL", lambda: pd.read_pickle(SYNTH_PKL).iloc[:n_samples])
-    vmap = ok("VITAL_MAP_PKL", lambda: pickle.load(open(VITAL_MAP_PKL, "rb")))
-    tokenizer = ok("토크나이저", lambda: AutoTokenizer.from_pretrained(model_id, trust_remote_code=True))
-    if df is None or vmap is None or tokenizer is None:
-        return False
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "left"
+    _orig = pd.read_pickle
+    pd.read_pickle = lambda p: _orig(p).iloc[:n_samples]
+    try:
+        result = ok(f"{steps} steps 학습 (실제 DPO/SimPOTrainer)", lambda: rlaif_mod.train(args))
+    finally:
+        pd.read_pickle = _orig
 
-    prompts, chosens, rejecteds = [], [], []
-    for _, row in df.iterrows():
-        emr = build_emr_text(row)
-        try:
-            v = row["수술 ID"]
-            sid = int(v.iloc[0]) if hasattr(v, "iloc") else int(v)
-        except Exception:
-            sid = -1
-        vital = vmap.get(sid, "")
-        user = build_user_prompt(emr, vital)
-        prompt = tokenizer.apply_chat_template(
-            [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}],
-            tokenize=False, add_generation_prompt=True,
-        )
-        prompts.append(prompt)
-        chosens.append(str(row.get("chosen", "특이사항 없음")))
-        rejecteds.append(str(row.get("rejected", "특이사항 없음")))
-
-    dataset = ok("Dataset", lambda: Dataset.from_dict({"prompt": prompts, "chosen": chosens, "rejected": rejecteds}))
-
-    _max_mem = {i: "40GiB" for i in range(torch.cuda.device_count())} if base == "gemma4" else None
-    model = ok("모델 로드", lambda: AutoModelForCausalLM.from_pretrained(
-        model_id, dtype=torch.bfloat16, device_map="auto",
-        max_memory=_max_mem, low_cpu_mem_usage=True, trust_remote_code=True,
-    ))
-    if model is None:
-        return False
-
-    _targets = LORA_TARGET_MODULES_GEMMA4 if base == "gemma4" else LORA_TARGET_MODULES
-    model = ok("LoRA", lambda: get_peft_model(model, LoraConfig(
-        r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT,
-        target_modules=_targets, bias="none", task_type="CAUSAL_LM",
-    )))
-    if model is None:
-        return False
-    model.config.use_cache = False
-    model.print_trainable_parameters()
-
-    if loss == "simpo":
-        from trainers.simpo_config import SimPOConfig
-        from trainers.simpo_trainer import SimPOTrainer
-        cfg = SimPOConfig(
-            output_dir="/tmp/smoke_rlaif", max_steps=steps,
-            per_device_train_batch_size=1, gradient_accumulation_steps=1,
-            max_length=512, max_prompt_length=384, bf16=True,
-            logging_steps=1, report_to="none", seed=42,
-        )
-        trainer = ok("SimPOTrainer", lambda: SimPOTrainer(
-            model=model, args=cfg, train_dataset=dataset, tokenizer=tokenizer,
-        ))
-    else:
-        from trl import DPOTrainer, DPOConfig
-        cfg = ok("DPOConfig", lambda: DPOConfig(
-            output_dir="/tmp/smoke_rlaif", loss_type="sigmoid", max_steps=steps,
-            per_device_train_batch_size=1, gradient_accumulation_steps=1,
-            max_length=512, bf16=True, logging_steps=1,
-            gradient_checkpointing=True, report_to="none", seed=42,
-        ))
-        trainer = ok("DPOTrainer", lambda: DPOTrainer(
-            model=model, ref_model=None, args=cfg,
-            train_dataset=dataset, processing_class=tokenizer,
-        ))
-
-    if trainer is None:
-        return False
-
-    result = ok(f"{steps} steps 학습", lambda: trainer.train())
     if result is None:
         return False
-
     print(f"\n{PASS} stage_rlaif 완료 → 03_rlaif_train.py 실행 가능")
     return True
 

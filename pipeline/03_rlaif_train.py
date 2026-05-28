@@ -218,6 +218,10 @@ def train(args):
         from trainers.simpo_config import SimPOConfig
         from trainers.simpo_trainer import SimPOTrainer
 
+        _simpo_extra = {}
+        if getattr(args, "max_steps", None) is not None:
+            _simpo_extra["max_steps"] = args.max_steps
+            shared_kwargs.pop("num_train_epochs", None)
         simpo_cfg = SimPOConfig(
             output_dir=str(output_dir),
             beta=2.0,  # SimPO 논문 기본값 (DPO의 0.1과 다름)
@@ -229,6 +233,7 @@ def train(args):
             gradient_checkpointing=True,
             gradient_checkpointing_kwargs={"use_reentrant": False},
             **{k: v for k, v in shared_kwargs.items() if k != "beta"},  # beta 중복 방지
+            **_simpo_extra,
         )
         trainer = SimPOTrainer(
             model=model,
@@ -237,6 +242,10 @@ def train(args):
             tokenizer=tokenizer,
         )
     else:
+        _dpo_extra = {}
+        if getattr(args, "max_steps", None) is not None:
+            _dpo_extra["max_steps"] = args.max_steps
+            shared_kwargs.pop("num_train_epochs", None)
         dpo_config = DPOConfig(
             output_dir=str(output_dir),
             loss_type="sigmoid",
@@ -245,6 +254,7 @@ def train(args):
             gradient_checkpointing=True,
             gradient_checkpointing_kwargs={"use_reentrant": False},
             **shared_kwargs,
+            **_dpo_extra,
         )
         trainer = DPOTrainer(
             model=model,
@@ -273,6 +283,7 @@ if __name__ == "__main__":
         default=None,
         help="SFT 완료 체크포인트 경로 (없으면 raw 모델 사용)",
     )
+    parser.add_argument("--max_steps", type=int, default=None, help="smoke test용 최대 step 수 (지정 시 epochs 무시)")
     parser.add_argument(
         "--gpus", type=str, default=None, help="사용할 GPU 번호. 예: '0' 또는 '0,1,2,3'"
     )
