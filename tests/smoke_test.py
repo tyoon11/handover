@@ -113,25 +113,34 @@ def stage_data():
 def stage_sft(base: str, steps: int = 3, n_samples: int = 8):
     """02_sft_train.py의 train() 함수를 직접 호출해서 실제 코드 경로를 검증."""
     header(f"Stage: sft — {base} · {steps} steps · {n_samples} samples")
-    import types, importlib.util, pandas as pd
+    import types, importlib.util, traceback, pandas as pd
 
-    spec = importlib.util.spec_from_file_location(
-        "sft_train", Path(__file__).resolve().parent.parent / "pipeline" / "02_sft_train.py"
-    )
-    sft_mod = importlib.util.module_from_spec(spec)
-    ok("02_sft_train 로드", lambda: spec.loader.exec_module(sft_mod))
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "sft_train", Path(__file__).resolve().parent.parent / "pipeline" / "02_sft_train.py"
+        )
+        sft_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sft_mod)
+        print(f"  {PASS} 02_sft_train 로드")
+    except Exception as e:
+        print(f"  {FAIL} 02_sft_train 로드: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return False
 
     args = types.SimpleNamespace(base=base, epochs=1, gpus=None, max_steps=steps)
 
     _orig = pd.read_pickle
     pd.read_pickle = lambda p: _orig(p).iloc[:n_samples]
     try:
-        result = ok(f"{steps} steps 학습 (실제 Trainer+JudgeAugmentedCollator)", lambda: sft_mod.train(args))
+        sft_mod.train(args)
+        print(f"  {PASS} {steps} steps 학습 (실제 Trainer+JudgeAugmentedCollator)")
+    except Exception as e:
+        print(f"  {FAIL} {steps} steps 학습: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return False
     finally:
         pd.read_pickle = _orig
 
-    if result is None:
-        return False
     print(f"\n{PASS} stage_sft 완료 → 02_sft_train.py 실행 가능")
     return True
 
@@ -140,26 +149,35 @@ def stage_sft(base: str, steps: int = 3, n_samples: int = 8):
 def stage_rlaif(base: str, loss: str = "dpo", steps: int = 3, n_samples: int = 8):
     """03_rlaif_train.py의 train() 함수를 직접 호출해서 실제 코드 경로를 검증."""
     header(f"Stage: rlaif — {base} · {loss} · {steps} steps")
-    import types, importlib.util, pandas as pd
+    import types, importlib.util, traceback, pandas as pd
 
-    spec = importlib.util.spec_from_file_location(
-        "rlaif_train", Path(__file__).resolve().parent.parent / "pipeline" / "03_rlaif_train.py"
-    )
-    rlaif_mod = importlib.util.module_from_spec(spec)
-    ok("03_rlaif_train 로드", lambda: spec.loader.exec_module(rlaif_mod))
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "rlaif_train", Path(__file__).resolve().parent.parent / "pipeline" / "03_rlaif_train.py"
+        )
+        rlaif_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rlaif_mod)
+        print(f"  {PASS} 03_rlaif_train 로드")
+    except Exception as e:
+        print(f"  {FAIL} 03_rlaif_train 로드: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return False
 
     args = types.SimpleNamespace(base=base, loss=loss, sft_ckpt=None, gpus=None, max_steps=steps)
 
     _orig = pd.read_pickle
     pd.read_pickle = lambda p: _orig(p).iloc[:n_samples]
     try:
-        result = ok(f"{steps} steps 학습 (실제 DPO/SimPOTrainer)", lambda: rlaif_mod.train(args))
+        rlaif_mod.train(args)
+        print(f"  {PASS} {steps} steps 학습 (실제 {loss.upper()}Trainer)")
+    except Exception as e:
+        print(f"  {FAIL} {steps} steps 학습: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return False
     finally:
         pd.read_pickle = _orig
 
-    if result is None:
-        return False
-    print(f"\n{PASS} stage_rlaif 완료 → 03_rlaif_train.py 실행 가능")
+    print(f"\n{PASS} stage_rlaif 완료 → 03_rlaif_train.py 실행 가능 ({loss})")
     return True
 
 
@@ -515,7 +533,8 @@ if __name__ == "__main__":
         choices=ALL_MODELS + ["all"], default=["llama"],
         help="테스트할 모델 (여러 개 가능, 'all'로 전체 선택)",
     )
-    parser.add_argument("--loss", choices=["dpo", "simpo"], default="dpo")
+    parser.add_argument("--loss", choices=["dpo", "simpo", "both"], default="both",
+                        help="rlaif loss (기본 both — dpo와 simpo 둘 다)")
     parser.add_argument("--steps", type=int, default=3, help="학습 steps (sft/rlaif용)")
     parser.add_argument("--n", type=int, default=2, help="샘플 수 (infer/eval용)")
     parser.add_argument("--samples", type=int, default=8, help="학습용 데이터 샘플 수")
@@ -543,7 +562,9 @@ if __name__ == "__main__":
             results[model]["sft"] = stage_sft(model, args.steps, args.samples)
 
         if args.all or args.stage == "rlaif":
-            results[model]["rlaif"] = stage_rlaif(model, args.loss, args.steps, args.samples)
+            losses = ["dpo", "simpo"] if args.loss == "both" else [args.loss]
+            for loss in losses:
+                results[model][f"rlaif_{loss}"] = stage_rlaif(model, loss, args.steps, args.samples)
 
         if args.all or args.stage == "infer":
             results[model]["infer"] = stage_infer(model, args.n)
