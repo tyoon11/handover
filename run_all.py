@@ -561,6 +561,8 @@ def main():
                         help="SCALE (Flan-T5 factual consistency) 평가 추가 — Phase 2에서 같이 실행")
     parser.add_argument("--scale_only", action="store_true",
                         help="기존 run의 score jsonl 전체에 SCALE만 추가 (run_all 완료 후 별도 실행)")
+    parser.add_argument("--export", action="store_true",
+                        help="평가 결과를 Excel(.xlsx) + Notion(.md)로 정리 후 종료")
     parser.add_argument(
         "--experiments", nargs="+", choices=[e[0] for e in EXPERIMENTS], default=None
     )
@@ -576,6 +578,19 @@ def main():
 
     if args.summarize:
         summarize_results()
+        return
+
+    if args.export:
+        from utils.export_results import main as _export_main
+        # 인자 전달 위해 sys.argv 임시 변경
+        _argv = sys.argv
+        sys.argv = ["export_results.py"]
+        if args.run_id:
+            sys.argv += ["--run_id", args.run_id]
+        try:
+            _export_main()
+        finally:
+            sys.argv = _argv
         return
 
     if args.scale_only:
