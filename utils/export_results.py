@@ -185,6 +185,8 @@ def export_excel(summary_df: pd.DataFrame, detail_records: dict,
             cases_df = pd.DataFrame(cases_long)
             ordered = ["model"] + [c for c in detail_cols if c in cases_df.columns]
             cases_df = cases_df[ordered].sort_values(["idx", "model", "experiment"])
+            if "generated" in cases_df.columns:
+                cases_df["generated"] = cases_df["generated"].map(_collapse_repeats)
             cases_df.to_excel(writer, sheet_name="Cases", index=False)
 
         # 모델별 상세
@@ -192,6 +194,8 @@ def export_excel(summary_df: pd.DataFrame, detail_records: dict,
             df = pd.DataFrame(recs)
             df = df[[c for c in detail_cols if c in df.columns]]
             df = df.sort_values(["idx", "experiment"])
+            if "generated" in df.columns:
+                df["generated"] = df["generated"].map(_collapse_repeats)
             sheet = f"{model[:28]}_details"
             df.to_excel(writer, sheet_name=sheet, index=False)
 
@@ -306,6 +310,39 @@ def _fmt_score(v, digits=2):
     return f"{v:.{digits}f}" if isinstance(v, float) else str(v)
 
 
+import re as _re
+
+# 반복 단위 탐지: 1~40자 유닛이 4회 이상(원본 + 3회) 연속
+_RE_REPEAT = _re.compile(r"(.{1,40}?)(?:\1){3,}", _re.DOTALL)
+# 단일 문자 긴 런 (예: "......", "----")
+_RE_CHAR_RUN = _re.compile(r"(.)\1{14,}", _re.DOTALL)
+
+
+def _collapse_repeats(text: str) -> str:
+    """degenerate 반복 출력(hari 등)을 보기 쉽게 축약.
+    예: '(34.5°C) (34.5°C) (34.5°C) ...' → '(34.5°C)  …(×38회 반복 생략)'"""
+    if not text:
+        return text
+
+    def _rep_sub(m):
+        unit = m.group(1)
+        total = len(m.group(0))
+        count = total // len(unit) if unit else 0
+        if count < 4:
+            return m.group(0)
+        return f"{unit} …(×{count}회 반복 생략)"
+
+    text = _RE_REPEAT.sub(_rep_sub, text)
+
+    def _char_sub(m):
+        ch = m.group(1)
+        n = len(m.group(0))
+        return f"{ch * 3}…(×{n})"
+
+    text = _RE_CHAR_RUN.sub(_char_sub, text)
+    return text
+
+
 def _rank_key(r):
     """정렬 키: sum 우선, 동점이면 scale_xl로 2차 정렬.
     judge 점수가 5/5로 포화되는 케이스가 많아 scale_xl이 실질 구분자."""
@@ -376,17 +413,19 @@ def export_cases_md(detail_records: dict, md_path: Path, run_id: str,
             )
         lines.append("\n")
 
-        # 모델별 출력 본문
-        lines.append("### 모델 출력 (점수 높은 순)\n\n")
+        # 모델별 출력 본문 (각 출력 <details> 토글 — 노션/깃헙 렌더 지원)
+        lines.append("### 모델 출력 (점수 높은 순, 클릭하여 펼치기)\n\n")
         for rank, r in enumerate(rs_sorted, 1):
             score = (f"sum=**{_fmt_score(r['sum'])}** "
                      f"(brev={_fmt_score(r['brevity'])}, "
                      f"crit={_fmt_score(r['critical'])}"
                      + (f", scale_xl={_fmt_score(r.get('scale_xl'), 3)}" if r.get('scale_xl') is not None else "")
                      + ")")
-            lines.append(f"#### {rank}위. {r['model']} · {_exp_label(r['experiment'])}\n")
-            lines.append(f"- {score}\n\n")
-            lines.append("```\n" + (r.get("generated") or "").strip() + "\n```\n\n")
+            gen = _collapse_repeats((r.get("generated") or "").strip())
+            lines.append(
+                f"<details><summary>{rank}위. {r['model']} · {_exp_label(r['experiment'])} — {score}</summary>\n\n"
+                + "```\n" + gen + "\n```\n\n</details>\n\n"
+            )
 
     md_path.write_text("".join(lines), encoding="utf-8")
     print(f"  [Cases MD] 저장: {md_path}  ({len(pick)} 케이스)")
@@ -467,13 +506,17 @@ def export_cases_html(detail_records: dict, html_path: Path, run_id: str):
             )
         out.append("</tbody></table>")
 
-        # 출력 본문
-        out.append("<h3>모델 출력</h3>")
+        # 출력 본문 (각 출력 토글, 상위 3개는 기본 펼침)
+        out.append("<h3>모델 출력 (클릭하여 펼치기)</h3>")
         for rank, r in enumerate(rs_sorted, 1):
-            out.append(f"<h4>{rank}위. {esc(r['model'])} · {esc(_exp_label(r['experiment']))} "
-                       f"<span class='meta'>(sum={_fmt_score(r['sum'])}, "
-                       f"brev={_fmt_score(r['brevity'])}, crit={_fmt_score(r['critical'])})</span></h4>")
-            out.append(f"<pre>{esc((r.get('generated') or '').strip())}</pre>")
+            gen = _collapse_repeats((r.get("generated") or "").strip())
+            open_attr = " open" if rank <= 3 else ""
+            summary = (f"{rank}위. {esc(r['model'])} · {esc(_exp_label(r['experiment']))} "
+                       f"— sum={_fmt_score(r['sum'])}, "
+                       f"brev={_fmt_score(r['brevity'])}, crit={_fmt_score(r['critical'])}"
+                       + (f", scale_xl={_fmt_score(r.get('scale_xl'), 3)}" if r.get('scale_xl') is not None else ""))
+            out.append(f"<details{open_attr}><summary>{summary}</summary>"
+                       f"<pre>{esc(gen)}</pre></details>")
 
     out.append("</body></html>")
     html_path.write_text("".join(out), encoding="utf-8")
