@@ -511,23 +511,10 @@ def _load_scale_scorers():
     except ImportError:
         path_large = path_xl = None
 
-    # scale_score 라이브러리 버그 우회 — get_flan_T5_model이 tokenizer를
-    # 항상 HF Hub에서 받음. utils + scorer 두 namespace 모두 patch 필요
-    # (scorer가 import 시점에 from scale_score.utils import 한 경우 대비)
+    # scale_score 라이브러리 버그 우회
+    # 1) get_flan_T5_model이 tokenizer를 항상 HF Hub에서 받음
+    # 2) device 인자 받지만 model.to(device) 호출 안 함 → CPU에 머무름
     from transformers import T5Tokenizer, T5ForConditionalGeneration
-
-    def _patched_get_flan_T5_model(size, model_path):
-        src = model_path or f"google/flan-t5-{size}"
-        print(f"  [patched] load Flan-T5-{size} from: {src}")
-        tokenizer = T5Tokenizer.from_pretrained(src, local_files_only=True)
-        model = T5ForConditionalGeneration.from_pretrained(src, local_files_only=True)
-        return model, tokenizer
-
-    _orig_utils_get = _scale_utils.get_flan_T5_model
-    _orig_scorer_get = getattr(_scale_scorer, "get_flan_T5_model", None)
-    _scale_utils.get_flan_T5_model = _patched_get_flan_T5_model
-    if _orig_scorer_get is not None:
-        _scale_scorer.get_flan_T5_model = _patched_get_flan_T5_model
 
     n_gpu = torch.cuda.device_count()
     if n_gpu >= 2:
@@ -535,17 +522,46 @@ def _load_scale_scorers():
     else:
         device_large = device_xl = "cuda:0" if n_gpu else "cpu"
 
+    def _make_patched(device):
+        """closure로 device 캡처 → tokenizer + model을 로컬에서 로드 + 명시적으로 to(device)"""
+        def _patched(size, model_path):
+            src = model_path or f"google/flan-t5-{size}"
+            print(f"  [patched] load Flan-T5-{size} from: {src} → {device}")
+            tokenizer = T5Tokenizer.from_pretrained(src, local_files_only=True)
+            model = T5ForConditionalGeneration.from_pretrained(src, local_files_only=True)
+            model = model.to(device)
+            model.eval()
+            return model, tokenizer
+        return _patched
+
+    _orig_utils_get = _scale_utils.get_flan_T5_model
+    _orig_scorer_get = getattr(_scale_scorer, "get_flan_T5_model", None)
+
+    def _apply_patch(patch_fn):
+        _scale_utils.get_flan_T5_model = patch_fn
+        if _orig_scorer_get is not None:
+            _scale_scorer.get_flan_T5_model = patch_fn
+
     print(f"\n[SCALE] scorer 로드 (large: {device_large}, xl: {device_xl})")
     print(f"  flan-large path: {path_large or 'HF Hub'}")
     print(f"  flan-xl    path: {path_xl or 'HF Hub'}")
 
     try:
+        _apply_patch(_make_patched(device_large))
         scorer_large = SCALEScorer(size="large", device=device_large, model_path=path_large)
+        _apply_patch(_make_patched(device_xl))
         scorer_xl = SCALEScorer(size="xl", device=device_xl, model_path=path_xl)
     finally:
         _scale_utils.get_flan_T5_model = _orig_utils_get
         if _orig_scorer_get is not None:
             _scale_scorer.get_flan_T5_model = _orig_scorer_get
+
+    # 추가 방어: SCALEScorer가 self.device 속성 못 쓰는 경우 강제 동기화
+    for scorer, dev in [(scorer_large, device_large), (scorer_xl, device_xl)]:
+        if hasattr(scorer, "device"):
+            scorer.device = dev
+        if hasattr(scorer, "model") and hasattr(scorer.model, "to"):
+            scorer.model.to(dev)
 
     return scorer_large, scorer_xl
 
