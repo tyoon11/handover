@@ -284,57 +284,194 @@ def export_notion_md(summary_df: pd.DataFrame, detail_records: dict, best_df: pd
     print(f"  [Notion MD] 저장: {md_path}")
 
 
-def export_cases_md(detail_records: dict, best_df: pd.DataFrame, md_path: Path, run_id: str,
-                    n_top: int = 5, n_bottom: int = 2):
-    """케이스별 입력+출력 비교 MD — 각 케이스마다 EMR/vital/human + 모든 모델 출력 나란히."""
-    # idx 기준 모든 모델·실험을 모으기
+# ── 학습 방식 한글 이름 ──────────────────────────────────────────────────
+EXP_LABELS = {
+    "raw":          "Raw (no training)",
+    "sft_1ep":      "SFT 1 epoch",
+    "sft_3ep":      "SFT 3 epoch",
+    "rlaif_dpo":    "DPO (from raw)",
+    "rlaif_simpo":  "SimPO (from raw)",
+    "sft_1ep_dpo":  "SFT 1ep → DPO",
+    "sft_3ep_dpo":  "SFT 3ep → DPO",
+}
+
+
+def _exp_label(exp_key: str) -> str:
+    return EXP_LABELS.get(exp_key, exp_key)
+
+
+def _fmt_score(v, digits=2):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return "-"
+    return f"{v:.{digits}f}" if isinstance(v, float) else str(v)
+
+
+def _group_by_idx(detail_records):
+    """{idx: [{model, experiment, ...}, ...]} 형태로 재정리."""
     by_idx = {}
     for model, recs in detail_records.items():
         for r in recs:
             idx = r["idx"]
             by_idx.setdefault(idx, []).append({"model": model, **r})
+    return by_idx
 
-    # 모든 case 정렬 (sum 평균 내림차순으로 좋은 케이스부터)
-    case_avg_sum = {idx: _avg([r["sum"] for r in rs]) for idx, rs in by_idx.items()}
-    sorted_idxs = sorted(case_avg_sum.keys(), key=lambda i: case_avg_sum[i] or 0, reverse=True)
 
-    # 상위 N + 하위 K만 표시 (전체는 너무 길어짐)
-    pick = sorted_idxs[:n_top]
-    if n_bottom > 0:
-        pick += sorted_idxs[-n_bottom:]
+def export_cases_md(detail_records: dict, md_path: Path, run_id: str,
+                    only_idxs=None):
+    """케이스별 입력·출력 전체 비교 MD — 임상 검토용 템플릿.
+    각 케이스마다 EMR/vital/human + 모든 모델·실험 출력 + 점수 표.
+    only_idxs로 일부 케이스만 선택 가능 (기본: 전체)."""
+    by_idx = _group_by_idx(detail_records)
+    case_avg = {idx: _avg([r["sum"] for r in rs]) for idx, rs in by_idx.items()}
+    all_idxs = sorted(by_idx.keys(), key=lambda i: case_avg[i] or 0, reverse=True)
+    pick = [i for i in all_idxs if (only_idxs is None or i in only_idxs)]
 
     lines = [
-        f"# 케이스별 입력·출력 비교 ({len(pick)}건 발췌)\n",
+        f"# 인계요약 모델 출력 비교 — 임상 검토용\n",
         f"- **Run ID**: `{run_id}`\n",
-        f"- **전체**: {len(sorted_idxs)} 케이스 중 상위 {n_top} + 하위 {n_bottom}\n\n",
+        f"- **케이스 수**: {len(pick)}\n",
+        f"- **점수 안내**: `brevity`(간결성), `critical`(중요정보 포함도), `sum`(합), `scale_xl`(factual consistency 0~1)\n\n",
+        "## 케이스 목차\n\n",
     ]
+    for idx in pick:
+        first = by_idx[idx][0]
+        lines.append(f"- [Case {idx} — {first.get('op_name', '-')}](#case-{idx}) (평균 SUM: {case_avg[idx]:.2f})\n")
+    lines.append("\n")
 
     for idx in pick:
         rs = by_idx[idx]
         first = rs[0]
-        lines.append(f"\n---\n\n## Case idx={idx} · sid={first.get('sid')} · {first.get('op_name', '-')}\n")
-        lines.append(f"- **평균 SUM**: {case_avg_sum[idx]:.3f}\n\n")
+        op = first.get("op_name", "-")
+        sid = first.get("sid", "-")
+        lines.append(f"\n---\n\n## <a id=\"case-{idx}\"></a>Case {idx} — {op}\n")
+        lines.append(f"- **수술 ID (sid)**: `{sid}`  \n")
+        lines.append(f"- **평균 SUM**: **{case_avg[idx]:.2f}**\n\n")
 
         # 입력
         emr = (first.get("EMR") or "").strip()
         vital = (first.get("vital") or "").strip()
         human = (first.get("human_ref") or "-").strip()
-        lines.append("### 입력 (EMR)\n```\n" + emr + "\n```\n\n")
-        if vital and vital != "-":
-            lines.append("### Vital 요약\n```\n" + vital + "\n```\n\n")
-        lines.append("### Human Reference (정답)\n```\n" + human + "\n```\n\n")
 
-        # 모델별 출력 (모델 × 실험 정렬, sum 내림차순)
-        lines.append("### 모델 출력\n\n")
+        lines.append("### 입력 1) EMR\n```\n" + emr + "\n```\n\n")
+        if vital and vital != "-":
+            lines.append("### 입력 2) Vital 요약\n```\n" + vital + "\n```\n\n")
+        lines.append("### 정답 (Human Reference)\n```\n" + human + "\n```\n\n")
+
+        # 점수 표 (모델 × 학습방식)
+        lines.append("### 점수 표 (sum 내림차순)\n\n")
+        lines.append("| 모델 | 학습 방식 | brevity | critical | **sum** | scale_xl |\n")
+        lines.append("|---|---|---|---|---|---|\n")
         rs_sorted = sorted(rs, key=lambda r: r.get("sum") or 0, reverse=True)
         for r in rs_sorted:
-            score_str = (f"brev={r['brevity']} crit={r['critical']} **sum={r['sum']}**"
-                         + (f"  scale_xl={r['scale_xl']:.3f}" if r.get("scale_xl") is not None else ""))
-            lines.append(f"**{r['model']} / {r['experiment']}** — {score_str}\n")
+            lines.append(
+                f"| {r['model']} | {_exp_label(r['experiment'])} | "
+                f"{_fmt_score(r['brevity'])} | {_fmt_score(r['critical'])} | "
+                f"**{_fmt_score(r['sum'])}** | {_fmt_score(r.get('scale_xl'), 3)} |\n"
+            )
+        lines.append("\n")
+
+        # 모델별 출력 본문
+        lines.append("### 모델 출력 (점수 높은 순)\n\n")
+        for rank, r in enumerate(rs_sorted, 1):
+            score = (f"sum=**{_fmt_score(r['sum'])}** "
+                     f"(brev={_fmt_score(r['brevity'])}, "
+                     f"crit={_fmt_score(r['critical'])}"
+                     + (f", scale_xl={_fmt_score(r.get('scale_xl'), 3)}" if r.get('scale_xl') is not None else "")
+                     + ")")
+            lines.append(f"#### {rank}위. {r['model']} · {_exp_label(r['experiment'])}\n")
+            lines.append(f"- {score}\n\n")
             lines.append("```\n" + (r.get("generated") or "").strip() + "\n```\n\n")
 
     md_path.write_text("".join(lines), encoding="utf-8")
-    print(f"  [Cases MD] 저장: {md_path}")
+    print(f"  [Cases MD] 저장: {md_path}  ({len(pick)} 케이스)")
+
+
+def export_cases_html(detail_records: dict, html_path: Path, run_id: str):
+    """검토용 단일 HTML — 토글/스타일 적용으로 브라우저에서 보기 쉬움."""
+    by_idx = _group_by_idx(detail_records)
+    case_avg = {idx: _avg([r["sum"] for r in rs]) for idx, rs in by_idx.items()}
+    all_idxs = sorted(by_idx.keys(), key=lambda i: case_avg[i] or 0, reverse=True)
+
+    def esc(s):
+        return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+    css = """
+    body { font-family: -apple-system, 'Segoe UI', sans-serif; max-width: 1200px; margin: 30px auto; padding: 0 20px; line-height: 1.5; color: #222; }
+    h1 { border-bottom: 2px solid #333; padding-bottom: 8px; }
+    h2 { background: #f0f4f8; padding: 12px 16px; border-left: 4px solid #2563eb; margin-top: 40px; }
+    h3 { color: #1e40af; margin-top: 20px; }
+    h4 { color: #4b5563; margin-bottom: 4px; }
+    pre { background: #f8f9fa; border: 1px solid #e1e4e8; padding: 12px; border-radius: 6px;
+          white-space: pre-wrap; word-wrap: break-word; font-size: 13px; line-height: 1.5; }
+    table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+    th, td { border: 1px solid #d1d5db; padding: 6px 10px; text-align: left; }
+    th { background: #f3f4f6; font-weight: 600; }
+    .score-best { background: #dcfce7; font-weight: 700; }
+    .toc a { text-decoration: none; color: #2563eb; }
+    .meta { color: #6b7280; font-size: 14px; }
+    details { margin: 8px 0; }
+    details summary { cursor: pointer; padding: 6px 10px; background: #f9fafb; border-radius: 4px; font-weight: 600; }
+    details[open] summary { background: #e0f2fe; }
+    """
+
+    out = [f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>인계요약 모델 비교 — {run_id}</title>",
+           f"<style>{css}</style></head><body>",
+           f"<h1>인계요약 모델 출력 비교 — 임상 검토용</h1>",
+           f"<p class='meta'>Run ID: <code>{run_id}</code> · 총 {len(all_idxs)} 케이스 · "
+           f"생성: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>",
+           "<p><b>점수 안내</b>: brevity(간결성 1~5), critical(중요정보 1~5), sum(합 2~10), "
+           "scale_xl(factual consistency 0~1)</p>",
+           "<h2>케이스 목차</h2><ul class='toc'>"]
+    for idx in all_idxs:
+        first = by_idx[idx][0]
+        out.append(f"<li><a href='#case-{idx}'>Case {idx} — {esc(first.get('op_name', '-'))}</a> "
+                   f"<span class='meta'>(평균 SUM: {case_avg[idx]:.2f})</span></li>")
+    out.append("</ul>")
+
+    for idx in all_idxs:
+        rs = by_idx[idx]
+        first = rs[0]
+        out.append(f"<h2 id='case-{idx}'>Case {idx} — {esc(first.get('op_name', '-'))}</h2>")
+        out.append(f"<p class='meta'>수술 ID: <code>{first.get('sid')}</code> · "
+                   f"평균 SUM: <b>{case_avg[idx]:.2f}</b></p>")
+
+        # 입력 (토글)
+        emr = (first.get("EMR") or "").strip()
+        vital = (first.get("vital") or "").strip()
+        human = (first.get("human_ref") or "-").strip()
+
+        out.append(f"<details open><summary>입력 1) EMR</summary><pre>{esc(emr)}</pre></details>")
+        if vital and vital != "-":
+            out.append(f"<details><summary>입력 2) Vital 요약</summary><pre>{esc(vital)}</pre></details>")
+        out.append(f"<details open><summary>정답 (Human Reference)</summary><pre>{esc(human)}</pre></details>")
+
+        # 점수 표
+        out.append("<h3>점수 표 (sum 내림차순)</h3>")
+        out.append("<table><thead><tr><th>모델</th><th>학습 방식</th><th>brevity</th>"
+                   "<th>critical</th><th>sum</th><th>scale_xl</th></tr></thead><tbody>")
+        rs_sorted = sorted(rs, key=lambda r: r.get("sum") or 0, reverse=True)
+        best_sum = rs_sorted[0].get("sum") if rs_sorted else None
+        for r in rs_sorted:
+            cls = " class='score-best'" if r.get("sum") == best_sum else ""
+            out.append(
+                f"<tr{cls}><td>{esc(r['model'])}</td><td>{esc(_exp_label(r['experiment']))}</td>"
+                f"<td>{_fmt_score(r['brevity'])}</td><td>{_fmt_score(r['critical'])}</td>"
+                f"<td><b>{_fmt_score(r['sum'])}</b></td>"
+                f"<td>{_fmt_score(r.get('scale_xl'), 3)}</td></tr>"
+            )
+        out.append("</tbody></table>")
+
+        # 출력 본문
+        out.append("<h3>모델 출력</h3>")
+        for rank, r in enumerate(rs_sorted, 1):
+            out.append(f"<h4>{rank}위. {esc(r['model'])} · {esc(_exp_label(r['experiment']))} "
+                       f"<span class='meta'>(sum={_fmt_score(r['sum'])}, "
+                       f"brev={_fmt_score(r['brevity'])}, crit={_fmt_score(r['critical'])})</span></h4>")
+            out.append(f"<pre>{esc((r.get('generated') or '').strip())}</pre>")
+
+    out.append("</body></html>")
+    html_path.write_text("".join(out), encoding="utf-8")
+    print(f"  [HTML] 저장: {html_path}  ({len(all_idxs)} 케이스)")
 
 
 def main():
@@ -388,8 +525,12 @@ def main():
     md_path = output_base / "results_notion.md"
     export_notion_md(summary_df, detail_records, best_df, md_path, run_id)
 
+    # 임상 검토용 — 전체 케이스 입력/출력/학습방식/점수 비교
     cases_md = output_base / "results_cases.md"
-    export_cases_md(detail_records, best_df, cases_md, run_id, n_top=5, n_bottom=2)
+    export_cases_md(detail_records, cases_md, run_id)
+
+    cases_html = output_base / "results_cases.html"
+    export_cases_html(detail_records, cases_html, run_id)
 
     print("\n[모델별 Best]")
     for _, r in best_df.iterrows():
