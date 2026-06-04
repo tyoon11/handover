@@ -450,41 +450,87 @@ def evaluate(args):
 
 
 def evaluate_batch(args):
-    """다중 파일 평가 — judge 모델 1회 로드, 모든 result_files 순회."""
+    """다중 파일 평가 — judge 1회 로드 + (옵션) SCALE 1회 로드."""
     judge, tok, gold_df, vmap = _load_eval_deps(args.judge_model or EVAL_JUDGE_MODEL)
-    print(f"\n[Batch Evaluate] {len(args.result_files)}개 파일 처리 시작")
+
+    # Phase A: judge 평가 (SCALE은 잠시 끄고 두 번째 패스에서 일괄)
+    do_scale = args.scale
+    args.scale = False  # _evaluate_single 내부 SCALE 호출 비활성화
+    print(f"\n[Batch Evaluate] Phase A: judge {len(args.result_files)}개 파일")
     for i, rf in enumerate(args.result_files):
-        print(f"\n──── [{i+1}/{len(args.result_files)}] ────")
-        out_tag = Path(rf).parent.name  # "llama_raw" 등 자동 추출
+        print(f"\n──── [{i+1}/{len(args.result_files)}] judge ────")
+        out_tag = Path(rf).parent.name
         _evaluate_single(rf, out_tag, judge, tok, gold_df, vmap, args)
+    args.scale = do_scale  # 복원
+
+    # Phase B: SCALE 1회 로드 후 일괄 평가
+    if do_scale:
+        import gc
+        del judge  # judge 모델 메모리 해제 (SCALE 위해)
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        print(f"\n[Batch Evaluate] Phase B: SCALE {len(args.result_files)}개 파일")
+        scorer_large, scorer_xl = _load_scale_scorers()
+        if scorer_large is None:
+            return
+        for i, rf in enumerate(args.result_files):
+            out_tag = Path(rf).parent.name
+            score_file = EVAL_OUT / out_tag / Path(rf).name.replace(".jsonl", "_scores.jsonl")
+            if not score_file.exists():
+                print(f"  [{i+1}/{len(args.result_files)}] [SKIP] {score_file.name} 없음")
+                continue
+            scored = [json.loads(l) for l in open(score_file, encoding="utf-8") if l.strip()]
+            print(f"\n──── [{i+1}/{len(args.result_files)}] scale: {out_tag} ────")
+            _run_scale_eval(scored, score_file.parent, score_file,
+                            scorer_large, scorer_xl, gold_df, vmap)
 
 
-def run_scale_eval(scored: list, out_dir: Path, result_file: Path):
-    """
-    SCALE (Flan-T5 기반 factual consistency) 평가.
-    원본 evaluation.ipynb의 scale_score 블록과 동일 로직.
-    large + xl 두 모델 모두 실행, chunk max → final score.
-    """
+def _load_scale_scorers():
+    """SCALE (Flan-T5) scorers 1회 로드 — large + xl"""
     try:
         from scale_score.scorer import SCALEScorer
     except ImportError:
         print("[SCALE] scale_score 미설치 — pip install scale_score 후 재시도")
-        return
+        return None, None
 
-    print("\n[SCALE 평가 시작]")
-    from config import EVAL_MODELS
-
-    device_large = "cuda:0"
-    device_xl = "cuda:1"
-
+    n_gpu = torch.cuda.device_count()
+    if n_gpu >= 2:
+        device_large, device_xl = "cuda:0", "cuda:1"
+    else:
+        device_large = device_xl = "cuda:0" if n_gpu else "cpu"
+    print(f"\n[SCALE] scorer 로드 (large: {device_large}, xl: {device_xl})")
     scorer_large = SCALEScorer(size="large", device=device_large)
     scorer_xl = SCALEScorer(size="xl", device=device_xl)
+    return scorer_large, scorer_xl
+
+
+def _run_scale_eval(scored: list, out_dir: Path, result_file: Path,
+                    scorer_large, scorer_xl, gold_df=None, vital_map=None):
+    """SCALE 평가 본체. scorer는 외부에서 1회 로드된 것을 받아 사용."""
+    if scorer_large is None or scorer_xl is None:
+        return
 
     CHUNK_SIZE = 100
     MAX_LEN = 512
 
-    premises = [r.get("emr_context", "") for r in scored]
-    hypotheses = [r.get("generated", "") for r in scored]
+    # premise(EMR) 재구성 — scored에 emr_context 없으므로 idx로 gold_df에서 가져옴
+    if gold_df is None:
+        gold_df = pd.read_pickle(GOLD_PKL)
+    if vital_map is None:
+        with open(VITAL_MAP_PKL, "rb") as f:
+            vital_map = pickle.load(f)
+
+    premises, hypotheses = [], []
+    for r in scored:
+        idx = r.get("idx", 0)
+        sid = r.get("sid", -1)
+        row = gold_df.iloc[idx] if idx < len(gold_df) else None
+        emr = build_emr_text(row) if row is not None else ""
+        vital = vital_map.get(sid, "")
+        premises.append(build_user_prompt(emr, vital))
+        hypotheses.append(r.get("generated", ""))
 
     def make_hypo_chunks(hypo_list, tokenizer):
         chunked, counts = [], []
@@ -492,9 +538,7 @@ def run_scale_eval(scored: list, out_dir: Path, result_file: Path):
             ids = tokenizer.encode(h, add_special_tokens=False)
             chunks = []
             for i in range(0, min(len(ids), MAX_LEN), CHUNK_SIZE):
-                sub = tokenizer.decode(
-                    ids[i : i + CHUNK_SIZE], skip_special_tokens=True
-                )
+                sub = tokenizer.decode(ids[i:i+CHUNK_SIZE], skip_special_tokens=True)
                 if sub.strip():
                     chunks.append(sub)
             chunked.append(chunks or [h])
@@ -508,30 +552,54 @@ def run_scale_eval(scored: list, out_dir: Path, result_file: Path):
     raw_xl = scorer_xl.score(premises, hypo_xl)
 
     def aggregate(raw, counts):
-        result, idx = [], 0
+        result, i = [], 0
         for c in counts:
-            result.append(max(raw[idx : idx + c]))
-            idx += c
+            result.append(max(raw[i:i+c]))
+            i += c
         return result
 
     scale_large = aggregate(raw_large, cnt_large)
     scale_xl = aggregate(raw_xl, cnt_xl)
 
-    # 결과 병합 저장
     scale_file = out_dir / result_file.name.replace(".jsonl", "_scale.jsonl")
     with open(scale_file, "w", encoding="utf-8") as f:
         for rec, sl, sx in zip(scored, scale_large, scale_xl):
-            f.write(
-                json.dumps(
-                    {**rec, "scale_large": sl, "scale_xl": sx},
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
+            f.write(json.dumps({**rec, "scale_large": sl, "scale_xl": sx},
+                               ensure_ascii=False) + "\n")
+    print(f"  SCALE large={sum(scale_large)/len(scale_large):.4f}  "
+          f"xl={sum(scale_xl)/len(scale_xl):.4f}  → {scale_file.name}")
 
-    print(f"  SCALE large mean: {sum(scale_large)/len(scale_large):.4f}")
-    print(f"  SCALE xl    mean: {sum(scale_xl)/len(scale_xl):.4f}")
-    print(f"  저장: {scale_file}")
+
+def run_scale_eval(scored, out_dir, result_file):
+    """기존 단일 파일 인터페이스 (backward compat)."""
+    scorer_large, scorer_xl = _load_scale_scorers()
+    _run_scale_eval(scored, out_dir, result_file, scorer_large, scorer_xl)
+
+
+def evaluate_scale_only(args):
+    """기존 judge 점수 jsonl에 SCALE만 추가 (SCALE 모델 1회 로드)."""
+    score_files = args.score_files
+    print(f"\n[SCALE-only] {len(score_files)}개 점수 파일에 SCALE 추가")
+
+    scorer_large, scorer_xl = _load_scale_scorers()
+    if scorer_large is None:
+        return
+
+    gold_df = pd.read_pickle(GOLD_PKL)
+    with open(VITAL_MAP_PKL, "rb") as f:
+        vital_map = pickle.load(f)
+
+    for i, sf in enumerate(score_files):
+        sf = Path(sf)
+        if not sf.exists():
+            print(f"  [{i+1}/{len(score_files)}] 없음: {sf}")
+            continue
+        scored = [json.loads(l) for l in open(sf, encoding="utf-8") if l.strip()]
+        if not scored:
+            print(f"  [{i+1}/{len(score_files)}] 비어있음: {sf}")
+            continue
+        print(f"\n──── [{i+1}/{len(score_files)}] {sf.parent.name} ({len(scored)}건) ────")
+        _run_scale_eval(scored, sf.parent, sf, scorer_large, scorer_xl, gold_df, vital_map)
 
 
 def compare_models(file_a: str, file_b: str):
@@ -640,6 +708,17 @@ if __name__ == "__main__":
         help="SCALE (Flan-T5 factual consistency) 평가 추가 실행",
     )
     parser.add_argument(
+        "--scale_only",
+        action="store_true",
+        help="기존 judge 점수 jsonl에 SCALE만 추가 (judge 재실행 안함). --score_files 지정 필요.",
+    )
+    parser.add_argument(
+        "--score_files",
+        nargs="+",
+        default=None,
+        help="--scale_only 모드용 점수 jsonl 파일들 (eval/<tag>/gold_results_scores.jsonl).",
+    )
+    parser.add_argument(
         "--compare",
         nargs=2,
         metavar=("FILE_A", "FILE_B"),
@@ -653,9 +732,13 @@ if __name__ == "__main__":
 
     if args.compare:
         compare_models(args.compare[0], args.compare[1])
+    elif args.scale_only:
+        if not args.score_files:
+            parser.error("--scale_only 사용 시 --score_files 필수")
+        evaluate_scale_only(args)
     elif args.result_files:
         evaluate_batch(args)
     elif args.result_file:
         evaluate(args)
     else:
-        parser.error("--result_file / --result_files / --compare 중 하나를 지정하세요.")
+        parser.error("--result_file / --result_files / --compare / --scale_only 중 하나를 지정하세요.")

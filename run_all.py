@@ -559,6 +559,8 @@ def main():
     parser.add_argument("--summarize", action="store_true", help="결과 요약만 출력")
     parser.add_argument("--scale", action="store_true",
                         help="SCALE (Flan-T5 factual consistency) 평가 추가 — Phase 2에서 같이 실행")
+    parser.add_argument("--scale_only", action="store_true",
+                        help="기존 run의 score jsonl 전체에 SCALE만 추가 (run_all 완료 후 별도 실행)")
     parser.add_argument(
         "--experiments", nargs="+", choices=[e[0] for e in EXPERIMENTS], default=None
     )
@@ -574,6 +576,20 @@ def main():
 
     if args.summarize:
         summarize_results()
+        return
+
+    if args.scale_only:
+        # 기존 run_id의 모든 eval/<tag>/gold_results_scores.jsonl을 SCALE로 추가 평가
+        score_files = sorted(str(p) for p in EVAL_OUT.rglob("*_scores.jsonl"))
+        if not score_files:
+            log(f"[scale_only] EVAL_OUT={EVAL_OUT}에 score 파일 없음")
+            return
+        eval_gpu_str = args.eval_gpus or args.gpus
+        log(f"\n[scale_only] {len(score_files)}개 점수 파일에 SCALE 추가 (GPU: {eval_gpu_str})")
+        run_cmd(
+            [sys.executable, "pipeline/05_evaluate.py", "--scale_only", "--score_files"] + score_files,
+            "Scale-only Evaluate", eval_gpu_str, "all",
+        )
         return
 
     active_exps = EXPERIMENTS
