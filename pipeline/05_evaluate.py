@@ -488,21 +488,33 @@ def evaluate_batch(args):
 
 
 def _load_scale_scorers():
-    """SCALE (Flan-T5) scorers 1회 로드 — large + xl"""
+    """SCALE (Flan-T5) scorers 1회 로드 — large + xl.
+    config.EVAL_MODELS의 로컬 경로 우선 사용 (HF Hub 접근 불가 환경 대응)."""
     try:
         from scale_score.scorer import SCALEScorer
     except ImportError:
         print("[SCALE] scale_score 미설치 — pip install scale_score 후 재시도")
         return None, None
 
+    try:
+        from config import EVAL_MODELS
+        path_large = str(EVAL_MODELS.get("flan-large", "")) if EVAL_MODELS.get("flan-large") and Path(EVAL_MODELS["flan-large"]).exists() else None
+        path_xl = str(EVAL_MODELS.get("flan-xl", "")) if EVAL_MODELS.get("flan-xl") and Path(EVAL_MODELS["flan-xl"]).exists() else None
+    except ImportError:
+        path_large = path_xl = None
+
     n_gpu = torch.cuda.device_count()
     if n_gpu >= 2:
         device_large, device_xl = "cuda:0", "cuda:1"
     else:
         device_large = device_xl = "cuda:0" if n_gpu else "cpu"
+
     print(f"\n[SCALE] scorer 로드 (large: {device_large}, xl: {device_xl})")
-    scorer_large = SCALEScorer(size="large", device=device_large)
-    scorer_xl = SCALEScorer(size="xl", device=device_xl)
+    print(f"  flan-large path: {path_large or 'HF Hub'}")
+    print(f"  flan-xl    path: {path_xl or 'HF Hub'}")
+
+    scorer_large = SCALEScorer(size="large", device=device_large, model_path=path_large)
+    scorer_xl = SCALEScorer(size="xl", device=device_xl, model_path=path_xl)
     return scorer_large, scorer_xl
 
 
