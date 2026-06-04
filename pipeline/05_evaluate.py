@@ -491,9 +491,13 @@ def _load_scale_scorers():
     """SCALE (Flan-T5) scorers 1회 로드 — large + xl.
     scale_score 0.x는 get_flan_T5_model이 tokenizer를 항상 HF Hub에서 받음(버그).
     monkey-patch로 우회해서 로컬 경로 강제."""
+    # SSL 차단 환경: HF Hub 접근 자체를 막아서 다른 경로로 다운로드 시도해도 즉시 실패
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
     try:
-        from scale_score.scorer import SCALEScorer
+        from scale_score import scorer as _scale_scorer
         from scale_score import utils as _scale_utils
+        SCALEScorer = _scale_scorer.SCALEScorer
     except ImportError:
         print("[SCALE] scale_score 미설치 — pip install scale_score 후 재시도")
         return None, None
@@ -507,18 +511,23 @@ def _load_scale_scorers():
     except ImportError:
         path_large = path_xl = None
 
-    # scale_score 내부 함수 monkey-patch — model_path가 있으면 tokenizer도 거기서 로드
+    # scale_score 라이브러리 버그 우회 — get_flan_T5_model이 tokenizer를
+    # 항상 HF Hub에서 받음. utils + scorer 두 namespace 모두 patch 필요
+    # (scorer가 import 시점에 from scale_score.utils import 한 경우 대비)
     from transformers import T5Tokenizer, T5ForConditionalGeneration
-    _orig_get = _scale_utils.get_flan_T5_model
 
     def _patched_get_flan_T5_model(size, model_path):
         src = model_path or f"google/flan-t5-{size}"
         print(f"  [patched] load Flan-T5-{size} from: {src}")
-        tokenizer = T5Tokenizer.from_pretrained(src)
-        model = T5ForConditionalGeneration.from_pretrained(src)
+        tokenizer = T5Tokenizer.from_pretrained(src, local_files_only=True)
+        model = T5ForConditionalGeneration.from_pretrained(src, local_files_only=True)
         return model, tokenizer
 
+    _orig_utils_get = _scale_utils.get_flan_T5_model
+    _orig_scorer_get = getattr(_scale_scorer, "get_flan_T5_model", None)
     _scale_utils.get_flan_T5_model = _patched_get_flan_T5_model
+    if _orig_scorer_get is not None:
+        _scale_scorer.get_flan_T5_model = _patched_get_flan_T5_model
 
     n_gpu = torch.cuda.device_count()
     if n_gpu >= 2:
@@ -534,7 +543,9 @@ def _load_scale_scorers():
         scorer_large = SCALEScorer(size="large", device=device_large, model_path=path_large)
         scorer_xl = SCALEScorer(size="xl", device=device_xl, model_path=path_xl)
     finally:
-        _scale_utils.get_flan_T5_model = _orig_get  # 원복
+        _scale_utils.get_flan_T5_model = _orig_utils_get
+        if _orig_scorer_get is not None:
+            _scale_scorer.get_flan_T5_model = _orig_scorer_get
 
     return scorer_large, scorer_xl
 
