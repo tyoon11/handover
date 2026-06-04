@@ -489,19 +489,36 @@ def evaluate_batch(args):
 
 def _load_scale_scorers():
     """SCALE (Flan-T5) scorers 1회 로드 — large + xl.
-    config.EVAL_MODELS의 로컬 경로 우선 사용 (HF Hub 접근 불가 환경 대응)."""
+    scale_score 0.x는 get_flan_T5_model이 tokenizer를 항상 HF Hub에서 받음(버그).
+    monkey-patch로 우회해서 로컬 경로 강제."""
     try:
         from scale_score.scorer import SCALEScorer
+        from scale_score import utils as _scale_utils
     except ImportError:
         print("[SCALE] scale_score 미설치 — pip install scale_score 후 재시도")
         return None, None
 
     try:
         from config import EVAL_MODELS
-        path_large = str(EVAL_MODELS.get("flan-large", "")) if EVAL_MODELS.get("flan-large") and Path(EVAL_MODELS["flan-large"]).exists() else None
-        path_xl = str(EVAL_MODELS.get("flan-xl", "")) if EVAL_MODELS.get("flan-xl") and Path(EVAL_MODELS["flan-xl"]).exists() else None
+        _p_large = EVAL_MODELS.get("flan-large")
+        _p_xl = EVAL_MODELS.get("flan-xl")
+        path_large = str(_p_large) if _p_large and Path(_p_large).exists() else None
+        path_xl = str(_p_xl) if _p_xl and Path(_p_xl).exists() else None
     except ImportError:
         path_large = path_xl = None
+
+    # scale_score 내부 함수 monkey-patch — model_path가 있으면 tokenizer도 거기서 로드
+    from transformers import T5Tokenizer, T5ForConditionalGeneration
+    _orig_get = _scale_utils.get_flan_T5_model
+
+    def _patched_get_flan_T5_model(size, model_path):
+        src = model_path or f"google/flan-t5-{size}"
+        print(f"  [patched] load Flan-T5-{size} from: {src}")
+        tokenizer = T5Tokenizer.from_pretrained(src)
+        model = T5ForConditionalGeneration.from_pretrained(src)
+        return model, tokenizer
+
+    _scale_utils.get_flan_T5_model = _patched_get_flan_T5_model
 
     n_gpu = torch.cuda.device_count()
     if n_gpu >= 2:
@@ -513,8 +530,12 @@ def _load_scale_scorers():
     print(f"  flan-large path: {path_large or 'HF Hub'}")
     print(f"  flan-xl    path: {path_xl or 'HF Hub'}")
 
-    scorer_large = SCALEScorer(size="large", device=device_large, model_path=path_large)
-    scorer_xl = SCALEScorer(size="xl", device=device_xl, model_path=path_xl)
+    try:
+        scorer_large = SCALEScorer(size="large", device=device_large, model_path=path_large)
+        scorer_xl = SCALEScorer(size="xl", device=device_xl, model_path=path_xl)
+    finally:
+        _scale_utils.get_flan_T5_model = _orig_get  # 원복
+
     return scorer_large, scorer_xl
 
 
