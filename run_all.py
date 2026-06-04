@@ -258,6 +258,7 @@ def run_parallel(
     only_eval: bool,
     exps: list,
     eval_gpus: str = None,
+    scale: bool = False,
 ):
     """
     Phase 1: 학습+추론 병렬 (gpu_pool 사용, judge 무관)
@@ -311,11 +312,11 @@ def run_parallel(
         return
 
     eval_gpu_str = eval_gpus or gpus_str
-    log(f"  {len(infer_files)}개 파일 batch 평가 (GPU: {eval_gpu_str})")
-    run_cmd(
-        [sys.executable, "pipeline/05_evaluate.py", "--result_files"] + infer_files,
-        "Batch Evaluate", eval_gpu_str, "all",
-    )
+    log(f"  {len(infer_files)}개 파일 batch 평가 (GPU: {eval_gpu_str}, SCALE: {scale})")
+    eval_cmd = [sys.executable, "pipeline/05_evaluate.py", "--result_files"] + infer_files
+    if scale:
+        eval_cmd.append("--scale")
+    run_cmd(eval_cmd, "Batch Evaluate", eval_gpu_str, "all")
 
     # 샘플 MD 생성
     for m in models:
@@ -556,6 +557,8 @@ def main():
         help="evaluate 전용 GPU (예: '4,5,6,7'). 지정 시 judge 모델이 이 GPU 전체를 사용하며 직렬 실행. 미지정 시 --gpus_per_job과 동일 슬롯 사용.",
     )
     parser.add_argument("--summarize", action="store_true", help="결과 요약만 출력")
+    parser.add_argument("--scale", action="store_true",
+                        help="SCALE (Flan-T5 factual consistency) 평가 추가 — Phase 2에서 같이 실행")
     parser.add_argument(
         "--experiments", nargs="+", choices=[e[0] for e in EXPERIMENTS], default=None
     )
@@ -594,6 +597,7 @@ def main():
         args.only_eval,
         active_exps,
         args.eval_gpus,
+        args.scale,
     )
 
     log("\n모든 파이프라인 완료.")
