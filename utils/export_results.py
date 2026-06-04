@@ -306,6 +306,12 @@ def _fmt_score(v, digits=2):
     return f"{v:.{digits}f}" if isinstance(v, float) else str(v)
 
 
+def _rank_key(r):
+    """정렬 키: sum 우선, 동점이면 scale_xl로 2차 정렬.
+    judge 점수가 5/5로 포화되는 케이스가 많아 scale_xl이 실질 구분자."""
+    return (r.get("sum") or 0, r.get("scale_xl") or 0)
+
+
 def _group_by_idx(detail_records):
     """{idx: [{model, experiment, ...}, ...]} 형태로 재정리."""
     by_idx = {}
@@ -358,10 +364,10 @@ def export_cases_md(detail_records: dict, md_path: Path, run_id: str,
         lines.append("### 정답 (Human Reference)\n```\n" + human + "\n```\n\n")
 
         # 점수 표 (모델 × 학습방식)
-        lines.append("### 점수 표 (sum 내림차순)\n\n")
+        lines.append("### 점수 표 (sum 내림차순, 동점 시 scale_xl 우선)\n\n")
         lines.append("| 모델 | 학습 방식 | brevity | critical | **sum** | scale_xl |\n")
         lines.append("|---|---|---|---|---|---|\n")
-        rs_sorted = sorted(rs, key=lambda r: r.get("sum") or 0, reverse=True)
+        rs_sorted = sorted(rs, key=_rank_key, reverse=True)
         for r in rs_sorted:
             lines.append(
                 f"| {r['model']} | {_exp_label(r['experiment'])} | "
@@ -446,10 +452,10 @@ def export_cases_html(detail_records: dict, html_path: Path, run_id: str):
         out.append(f"<details open><summary>정답 (Human Reference)</summary><pre>{esc(human)}</pre></details>")
 
         # 점수 표
-        out.append("<h3>점수 표 (sum 내림차순)</h3>")
+        out.append("<h3>점수 표 (sum 내림차순, 동점 시 scale_xl 우선)</h3>")
         out.append("<table><thead><tr><th>모델</th><th>학습 방식</th><th>brevity</th>"
                    "<th>critical</th><th>sum</th><th>scale_xl</th></tr></thead><tbody>")
-        rs_sorted = sorted(rs, key=lambda r: r.get("sum") or 0, reverse=True)
+        rs_sorted = sorted(rs, key=_rank_key, reverse=True)
         best_sum = rs_sorted[0].get("sum") if rs_sorted else None
         for r in rs_sorted:
             cls = " class='score-best'" if r.get("sum") == best_sum else ""
