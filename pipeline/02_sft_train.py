@@ -59,6 +59,7 @@ from config import (
     LORA_DROPOUT,
     LORA_TARGET_MODULES,
     LORA_TARGET_MODULES_GEMMA4,
+    GEMMA4_BASES,
     SFT_CONFIG,
     SYSTEM_PROMPT,
     build_user_prompt,
@@ -166,6 +167,7 @@ def _get_resp_template_ids(base: str, tokenizer) -> List[int]:
         "qwen35": "<|im_start|>assistant\n",
         "hari": "<|im_start|>assistant\n",
         "gemma4": "<start_of_turn>model\n",
+        "gemma4_31b": "<start_of_turn>model\n",
     }
     tmpl = templates.get(base, "<|im_start|>assistant\n")
     return tokenizer.encode(tmpl, add_special_tokens=False)
@@ -256,7 +258,7 @@ def train(args):
     # 모델
     print("모델 로드 중...")
     _attn_kwargs = {}
-    if args.base != "gemma4" and importlib.util.find_spec("flash_attn") is not None:
+    if args.base not in GEMMA4_BASES and importlib.util.find_spec("flash_attn") is not None:
         _attn_kwargs["attn_implementation"] = "flash_attention_2"
 
     _max_mem = {i: "40GiB" for i in range(torch.cuda.device_count())}
@@ -273,7 +275,7 @@ def train(args):
 
     # LoRA
     _lora_targets = (
-        LORA_TARGET_MODULES_GEMMA4 if args.base == "gemma4" else LORA_TARGET_MODULES
+        LORA_TARGET_MODULES_GEMMA4 if args.base in GEMMA4_BASES else LORA_TARGET_MODULES
     )
     lora_cfg = LoraConfig(
         r=LORA_R,
@@ -355,7 +357,7 @@ def train(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Synthetic SFT with LoRA")
     parser.add_argument(
-        "--base", choices=["llama", "qwen", "gemma4", "qwen35", "hari"], default="llama"
+        "--base", choices=list(SFT_MODELS.keys()), default="llama"
     )
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--max_steps", type=int, default=None, help="smoke test용 최대 step 수 (지정 시 epochs 무시)")

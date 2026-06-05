@@ -559,7 +559,7 @@ def stage_orchestrator():
 
 
 # ── main ──────────────────────────────────────────────────────────────────
-ALL_MODELS = ["llama", "qwen", "gemma4", "qwen35", "hari"]
+ALL_MODELS = ["llama", "qwen", "gemma4", "gemma4_31b", "qwen35", "hari"]
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="파이프라인 단계별 smoke test")

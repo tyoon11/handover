@@ -50,6 +50,7 @@ from config import (
     LORA_DROPOUT,
     LORA_TARGET_MODULES,
     LORA_TARGET_MODULES_GEMMA4,
+    GEMMA4_BASES,
     RLAIF_CONFIG,
     SYSTEM_PROMPT,
     build_user_prompt,
@@ -194,7 +195,7 @@ def train(args):
 
     # ── LoRA 적용 (항상 새로 붙임 — merge 후이므로) ───────────────────────
     _lora_targets = (
-        LORA_TARGET_MODULES_GEMMA4 if args.base == "gemma4" else LORA_TARGET_MODULES
+        LORA_TARGET_MODULES_GEMMA4 if args.base in GEMMA4_BASES else LORA_TARGET_MODULES
     )
     lora_cfg = LoraConfig(
         r=LORA_R,
@@ -289,7 +290,7 @@ def train(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Self-Judge RLAIF (DPO/SimPO)")
     parser.add_argument(
-        "--base", choices=["llama", "qwen", "gemma4", "qwen35", "hari"], default="llama"
+        "--base", choices=list(SFT_MODELS.keys()), default="llama"
     )
     parser.add_argument("--loss", choices=["dpo", "simpo"], default="dpo")
     parser.add_argument(

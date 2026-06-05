@@ -28,6 +28,11 @@ SYNTH_PKL = DATA_DIR / "synthetic/jsft_score_251213.pkl"  # 2736×249, chosen/re
 # ── Vital summarizer 출력 경로 ────────────────────────────────────────────
 VITAL_MAP_PKL = DATA_DIR / "vital_summary_map.pkl"  # {수술ID: vital_summary_str}
 
+# ── 참고 인계요약 (gemma-3-27b-it 초안, KHS 엑셀) ───────────────────────────
+# 주의: clinician이 직접 쓴 정답이 아니라 gemma-3-27b가 생성한 '참고용' 초안.
+# 사람 작성 칸(인계요약지)은 전부 비어있어 실제 human reference는 존재하지 않음.
+GOLD_REF_XLSX = DATA_DIR / "gold_sampled" / "인계요약지_gold_sampled_251002_KHS.xlsx"
+
 # ── EMR MultiIndex 컬럼 접근 ──────────────────────────────────────────────
 # df는 3레벨 MultiIndex. 주요 컬럼 튜플 키:
 EMR_SID_COL = "수술 ID"  # level0, int64, 공백 있음 (Vital의 수술ID와 다름!)
@@ -93,9 +98,13 @@ SFT_MODELS = {
     "llama": MODEL_BASE / "Llama-3.1-8B-Instruct",
     "qwen": MODEL_BASE / "Qwen3-8B",
     "gemma4": MODEL_BASE / "gemma-4-E4B-it",
+    "gemma4_31b": MODEL_BASE / "gemma-4-31B-it",
     "qwen35": MODEL_BASE / "Qwen3.5-9B",
     "hari": MODEL_BASE / "hari-q3-8b",
 }
+
+# gemma-4 계열(언어모델 LoRA 타깃·attn_impl 특수처리 필요) — 코드에서 멤버십으로 분기
+GEMMA4_BASES = {"gemma4", "gemma4_31b"}
 
 # 평가 모델 경로
 EVAL_MODELS = {

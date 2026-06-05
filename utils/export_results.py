@@ -25,7 +25,7 @@ import pandas as pd
 
 from config import (
     OUTPUT_BASE, EVAL_OUT, INFER_OUT,
-    GOLD_PKL, GOLD_REF_PKL, VITAL_MAP_PKL,
+    GOLD_PKL, VITAL_MAP_PKL, GOLD_REF_XLSX,
     build_emr_text, build_user_prompt,
 )
 
@@ -35,8 +35,50 @@ def _avg(values):
     return round(sum(vals) / len(vals), 4) if vals else None
 
 
+def _load_gemma_ref_map():
+    """KHS 엑셀에서 {수술ID: gemma-3-27b 참고용 인계요약 초안} 매핑 로드.
+    주의: 사람이 쓴 정답이 아니라 gemma-3-27b 생성 초안(참고용)."""
+    ref_map = {}
+    try:
+        gx = pd.read_excel(GOLD_REF_XLSX, header=[0, 1, 2])
+    except Exception as e:
+        print(f"  [경고] 참고 인계요약 엑셀 로드 실패: {e}")
+        return ref_map
+
+    # 수술 ID 컬럼
+    sid_col = next((c for c in gx.columns if c[0] == "수술 ID"), None)
+    # '참고용' (gemma-3-27b) 컬럼 — 그룹 '인계요약지_sample_from_LLM' 중 채워진 게 많은 것
+    cand = [c for c in gx.columns if c[0] == "인계요약지_sample_from_LLM"]
+    ref_col = None
+    best = -1
+    for c in cand:
+        n = gx[c].apply(lambda v: isinstance(v, str) and v.strip() not in ("", "-", "nan")).sum()
+        if n > best:
+            best, ref_col = n, c
+    if sid_col is None or ref_col is None:
+        print("  [경고] 참고 인계요약 컬럼을 찾지 못함")
+        return ref_map
+
+    for i in range(len(gx)):
+        sid_v = gx[sid_col].iloc[i]
+        sid = None
+        try:
+            sid = int(sid_v.iloc[0]) if hasattr(sid_v, "iloc") else int(sid_v)
+        except Exception:
+            try:
+                sid = int(str(sid_v).strip())
+            except Exception:
+                continue
+        v = gx[ref_col].iloc[i]
+        if isinstance(v, str) and v.strip() not in ("", "-", "nan"):
+            ref_map[sid] = v.strip()
+    print(f"  참고 인계요약(gemma-3-27b 초안): {len(ref_map)}건 로드")
+    return ref_map
+
+
 def _load_inputs():
-    """gold_df + vital_map + human ref. idx → (op_name, emr, vital, human) 매핑 반환."""
+    """gold_df + vital_map + 참고 인계요약(gemma 초안). idx → 매핑 반환.
+    원본 마취기록은 입력 EMR에 이미 포함되므로 별도 표시하지 않음."""
     inputs = {}
     try:
         gold_df = pd.read_pickle(GOLD_PKL)
@@ -45,15 +87,12 @@ def _load_inputs():
         return inputs
 
     try:
-        ref_df = pd.read_pickle(GOLD_REF_PKL)
-    except Exception:
-        ref_df = None
-
-    try:
         with open(VITAL_MAP_PKL, "rb") as f:
             vital_map = pickle.load(f)
     except Exception:
         vital_map = {}
+
+    gemma_ref = _load_gemma_ref_map()
 
     for idx in range(len(gold_df)):
         row = gold_df.iloc[idx]
@@ -69,25 +108,15 @@ def _load_inputs():
             sid = int(v.iloc[0]) if hasattr(v, "iloc") else int(v)
         except Exception:
             sid = -1
-        # EMR + vital
         emr = build_emr_text(row)
         vital = vital_map.get(sid, "")
-        # human reference
-        human = "-"
-        if ref_df is not None and idx < len(ref_df):
-            try:
-                h = ref_df.iloc[idx][("마취기록", "기록", "")]
-                human = str(h)
-                if human == "nan":
-                    human = "-"
-            except Exception:
-                pass
+        ref_draft = gemma_ref.get(sid, "-")
         inputs[idx] = {
             "op_name": op_name,
             "sid": sid,
             "emr": emr,
             "vital": vital,
-            "human_ref": human,
+            "ref_draft": ref_draft,
         }
     return inputs
 
@@ -95,7 +124,7 @@ def _load_inputs():
 def collect_results(eval_out: Path):
     """EVAL_OUT의 모든 *_scores.jsonl + (있으면) *_scores_scale.jsonl을 수집.
     각 샘플에 입력(EMR/vital/human ref/수술명)도 함께 담음."""
-    inputs = _load_inputs()  # {idx: {op_name, sid, emr, vital, human_ref}}
+    inputs = _load_inputs()  # {idx: {op_name, sid, emr, vital, ref_draft}}
 
     summary_rows = []
     detail_records = {}            # {model: [샘플 dict ...]}
@@ -142,7 +171,7 @@ def collect_results(eval_out: Path):
                 "scale_xl": r.get("scale_xl"),
                 "EMR": inp.get("emr", ""),
                 "vital": inp.get("vital", ""),
-                "human_ref": inp.get("human_ref", "-"),
+                "ref_draft": inp.get("ref_draft", "-"),
                 "generated": r.get("generated") or "",
             }
             detail_records[model].append(rec)
@@ -173,7 +202,7 @@ def export_excel(summary_df: pd.DataFrame, detail_records: dict,
     detail_cols = [
         "experiment", "idx", "sid", "op_name",
         "brevity", "critical", "sum", "scale_large", "scale_xl",
-        "EMR", "vital", "human_ref", "generated",
+        "EMR", "vital", "ref_draft", "generated",
     ]
 
     with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
@@ -204,7 +233,7 @@ def export_excel(summary_df: pd.DataFrame, detail_records: dict,
             ws = writer.sheets[sheet_name]
             for col in ws.columns:
                 header = col[0].value
-                if header in ("EMR", "vital", "human_ref", "generated"):
+                if header in ("EMR", "vital", "ref_draft", "generated"):
                     ws.column_dimensions[col[0].column_letter].width = 60
                     for cell in col[1:]:
                         cell.alignment = openpyxl.styles.Alignment(wrap_text=True, vertical="top")
@@ -393,12 +422,12 @@ def export_cases_md(detail_records: dict, md_path: Path, run_id: str,
         # 입력
         emr = (first.get("EMR") or "").strip()
         vital = (first.get("vital") or "").strip()
-        human = (first.get("human_ref") or "-").strip()
+        ref = (first.get("ref_draft") or "-").strip()
 
         lines.append("### 입력 1) EMR\n```\n" + emr + "\n```\n\n")
         if vital and vital != "-":
             lines.append("### 입력 2) Vital 요약\n```\n" + vital + "\n```\n\n")
-        lines.append("### 정답 (Human Reference)\n```\n" + human + "\n```\n\n")
+        lines.append("### 참고 인계요약 (gemma-3-27b 초안, 정답 아님)\n```\n" + ref + "\n```\n\n")
 
         # 점수 표 (모델 × 학습방식)
         lines.append("### 점수 표 (sum 내림차순, 동점 시 scale_xl 우선)\n\n")
@@ -483,12 +512,13 @@ def export_cases_html(detail_records: dict, html_path: Path, run_id: str):
         # 입력 (토글)
         emr = (first.get("EMR") or "").strip()
         vital = (first.get("vital") or "").strip()
-        human = (first.get("human_ref") or "-").strip()
+        ref = (first.get("ref_draft") or "-").strip()
 
         out.append(f"<details open><summary>입력 1) EMR</summary><pre>{esc(emr)}</pre></details>")
         if vital and vital != "-":
             out.append(f"<details><summary>입력 2) Vital 요약</summary><pre>{esc(vital)}</pre></details>")
-        out.append(f"<details open><summary>정답 (Human Reference)</summary><pre>{esc(human)}</pre></details>")
+        out.append("<details open><summary>참고 인계요약 (gemma-3-27b 초안 · 정답 아님)</summary>"
+                   f"<pre>{esc(ref)}</pre></details>")
 
         # 점수 표
         out.append("<h3>점수 표 (sum 내림차순, 동점 시 scale_xl 우선)</h3>")
