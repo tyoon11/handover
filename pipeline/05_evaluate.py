@@ -216,15 +216,83 @@ def judge_score(
             temperature=0.0,
             do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
+            return_dict_in_generate=True,
+            output_scores=True,
         )
-    text = tokenizer.decode(
-        out[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True
-    )
+    gen_ids = out.sequences[0][inputs["input_ids"].shape[1]:]
+    text = tokenizer.decode(gen_ids, skip_special_tokens=True)
+
+    # ── 연속 점수: [RESULT] 직후 점수 토큰의 확률분포로 기대값 계산 ──
+    # 정수 1~5 파싱은 44% 만점 포화 → 변별 안 됨.
+    # 점수 토큰(1~5) logits에서 softmax 기대값을 쓰면 4.7/4.2처럼 연속값.
+    cont = _continuous_score_from_logits(tokenizer, gen_ids, out.scores)
+    if cont is not None:
+        return cont
+
+    # fallback: 정수 파싱
     m = re.search(r"\[RESULT\]\s*([1-5])", text)
     if m:
         return float(m.group(1))
     nums = re.findall(r"\b([1-5])\b", text)
     return float(nums[-1]) if nums else 3.0
+
+
+_SCORE_TOKEN_IDS: dict = {}
+
+
+def _get_score_token_ids(tokenizer):
+    """점수 숫자 1~5의 토큰 ID 맵 {digit: [id, ...]} 캐싱.
+    'N'과 ' N'(공백+숫자) 두 변형 모두 포함."""
+    key = id(tokenizer)
+    if key not in _SCORE_TOKEN_IDS:
+        m = {}
+        for d in range(1, 6):
+            ids = set()
+            for variant in (str(d), f" {d}"):
+                enc = tokenizer.encode(variant, add_special_tokens=False)
+                if enc:
+                    ids.add(enc[-1])
+            m[d] = list(ids)
+        _SCORE_TOKEN_IDS[key] = m
+    return _SCORE_TOKEN_IDS[key]
+
+
+def _continuous_score_from_logits(tokenizer, gen_ids, scores):
+    """생성 토큰 중 '[RESULT]' 뒤 첫 숫자(1~5) 위치를 찾아 그 step의
+    logits에서 점수 토큰 확률로 기대값(1~5 연속)을 계산."""
+    if not scores:
+        return None
+    import torch as _t
+    digit_ids = _get_score_token_ids(tokenizer)
+    all_digit_ids = {tid: d for d, ids in digit_ids.items() for tid in ids}
+
+    gen_list = gen_ids.tolist()
+    # '[RESULT]' 토큰 위치 파악: 누적 디코드로 위치 찾기
+    result_pos = None
+    acc = ""
+    for i, tid in enumerate(gen_list):
+        acc = tokenizer.decode(gen_list[: i + 1], skip_special_tokens=True)
+        if "[RESULT]" in acc:
+            result_pos = i
+            break
+    if result_pos is None:
+        return None
+
+    # [RESULT] 이후 첫 점수 토큰 step 찾기
+    for j in range(result_pos, min(len(gen_list), len(scores))):
+        if gen_list[j] in all_digit_ids:
+            logits = scores[j][0]  # (vocab,)
+            # 1~5 토큰만 모아 softmax
+            cand_ids, cand_digits = [], []
+            for d, ids in digit_ids.items():
+                for tid in ids:
+                    cand_ids.append(tid)
+                    cand_digits.append(d)
+            sub = logits[cand_ids]
+            probs = _t.softmax(sub.float(), dim=-1)
+            exp = sum(p.item() * d for p, d in zip(probs, cand_digits))
+            return round(exp, 4)
+    return None
 
 
 _AB_TOKEN_IDS: dict = {}
