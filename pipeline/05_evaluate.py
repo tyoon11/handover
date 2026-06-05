@@ -11,6 +11,9 @@ _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 import sys, os, argparse, re
 
+# 메모리 단편화 완화 (judge 모델이 큼 — OOM 방지)
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+
 
 def _early_parse():
     p = argparse.ArgumentParser(add_help=False)
@@ -140,7 +143,17 @@ def load_judge_model(model_id: str):
     tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    _max_mem = {i: "40GiB" for i in range(torch.cuda.device_count())}
+    # GPU별 실제 여유 메모리 기준으로 상한 설정 (다른 프로세스가 점유 중이면 자동 회피)
+    _max_mem = {}
+    for i in range(torch.cuda.device_count()):
+        free_b, _total = torch.cuda.mem_get_info(i)
+        usable = max(0, int(free_b / 1e9) - 3)  # 3GB 여유
+        _max_mem[i] = f"{usable}GiB"
+    print(f"  GPU별 사용 상한: {_max_mem}")
+    total_usable = sum(int(v[:-3]) for v in _max_mem.values())
+    if total_usable < 90:
+        print(f"  ⚠ 가용 GPU 메모리 {total_usable}GiB < ~93GiB(judge 필요). "
+              f"다른 프로세스 종료 또는 빈 GPU 지정 필요할 수 있음.")
     # MoE 모델(Mixtral 계열)은 weight 재저장 시 offload_folder 필요
     _offload_dir = tempfile.mkdtemp(prefix="hf_offload_judge_")
     mdl = AutoModelForCausalLM.from_pretrained(
