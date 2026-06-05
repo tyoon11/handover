@@ -47,8 +47,14 @@ from config import (
 )
 
 # ── Thinking 후처리 (04_inference와 동일 — judge 입력 이중 방어용) ───────
+# qwen35는 답을 먼저 내고 trailing으로 <think>(안 닫힘)/Thinking Process가 붙음
 
-_RE_THINK_TAG = re.compile(r"<think>.*?</think>", re.DOTALL)
+_RE_THINK_CLOSED = re.compile(r"<think>.*?</think>", re.DOTALL)
+_RE_THINK_OPEN = re.compile(r"<think>.*$", re.DOTALL)
+_RE_THINK_TRAILING = re.compile(
+    r"\n*\s*(?:Thinking Process|Analyze the Request)\b.*$",
+    re.DOTALL | re.IGNORECASE,
+)
 _RE_THINK_PREAMBLE = re.compile(
     r"^\s*(?:Thinking Process|Analyze the Request|Analysis|Step \d|<think>).*?"
     r"(?=(?:##|환아|환자|\*\*환자|소아|▶|\d{2}:\d{2}|특이사항))",
@@ -63,8 +69,11 @@ _RE_JUNK = re.compile(
 
 
 def clean_output(text: str) -> str:
-    """judge 입력 전 최종 정제. 04_inference에서 이미 정제됐으면 no-op에 가까움."""
-    text = _RE_THINK_TAG.sub("", text)
+    """judge 입력 전 최종 정제. 04_inference의 clean_output과 동일 로직.
+    generated_raw에서 재정제할 때 thinking 누출을 확실히 제거."""
+    text = _RE_THINK_CLOSED.sub("", text)
+    text = _RE_THINK_OPEN.sub("", text)
+    text = _RE_THINK_TRAILING.sub("", text)
     text = _RE_JUNK.sub("", text)
     text = _RE_THINK_PREAMBLE.sub("", text, count=1)
     cleaned = text.strip()
@@ -147,15 +156,34 @@ def load_judge_model(model_id: str):
     return mdl, tok
 
 
+# judge 입력 토큰 예산 (Prometheus=Mistral 8x7b는 32k context 지원)
+JUDGE_MAX_TOTAL = 8192
+JUDGE_MAX_NEW = 256
+
+
+def _build_judge_content(tokenizer, instruction, response, rubric,
+                         max_total=JUDGE_MAX_TOTAL, max_new=JUDGE_MAX_NEW):
+    """긴 EMR(instruction) 때문에 response·rubric·[RESULT] 트리거가 잘리지 않도록
+    instruction만 남는 토큰 예산에 맞춰 자른다.
+    (이전 버그: 전체 prompt를 우측 truncation → 긴 EMR 케이스에서 평가 대상이 통째로 잘림)"""
+    budget = max_total - max_new - 64  # 안전 여유
+    # instruction 제외한 고정부(헤더+response+rubric) 길이 측정
+    fixed = _ABSOLUTE_PROMPT.format(instruction="", response=response, rubric=rubric)
+    fixed_len = len(tokenizer(fixed, add_special_tokens=False)["input_ids"])
+    instr_budget = max(256, budget - fixed_len)
+
+    instr_ids = tokenizer(instruction, add_special_tokens=False)["input_ids"]
+    if len(instr_ids) > instr_budget:
+        instruction = tokenizer.decode(instr_ids[:instr_budget], skip_special_tokens=True)
+        instruction += "\n…(EMR 길이 초과로 일부 생략)"
+    return _ABSOLUTE_PROMPT.format(instruction=instruction, response=response, rubric=rubric)
+
+
 def judge_score(
     model, tokenizer, instruction: str, response: str, rubric: str
 ) -> float:
     """Absolute scoring → 1~5점. 텍스트 [RESULT] N 파싱 방식 (단독 평가 시)."""
-    content = _ABSOLUTE_PROMPT.format(
-        instruction=instruction,
-        response=response,
-        rubric=rubric,
-    )
+    content = _build_judge_content(tokenizer, instruction, response, rubric)
     # Mistral/Prometheus chat_template은 system role을 지원하지 않아 user에 합침
     msgs = [{"role": "user", "content": f"{JUDGE_SYSTEM_PROMPT}\n\n{content}"}]
     if hasattr(tokenizer, "chat_template") and tokenizer.chat_template:
@@ -166,7 +194,7 @@ def judge_score(
         prompt = f"[INST] {JUDGE_SYSTEM_PROMPT}\n\n{content} [/INST]"
 
     inputs = tokenizer(
-        prompt, return_tensors="pt", truncation=True, max_length=3072
+        prompt, return_tensors="pt", truncation=True, max_length=JUDGE_MAX_TOTAL
     ).to(model.device)
     with torch.no_grad():
         out = model.generate(
@@ -384,8 +412,9 @@ def _evaluate_single(result_file, out_tag, judge_model, judge_tok, gold_df, vita
             sid = rec.get("sid", -1)
 
             # generated 필드 추출 + 이중 정제
-            # 신버전은 이미 정제됐지만 혹시 모를 잔여 오염도 제거
-            gen_raw = rec.get("generated", rec.get("response", ""))
+            # generated_raw(원본)이 있으면 그걸로 재정제 → thinking 누출 소급 제거
+            # (과거 정제 시점의 clean_output 버그를 재평가로 교정)
+            gen_raw = rec.get("generated_raw") or rec.get("generated", rec.get("response", ""))
             gen = clean_output(gen_raw)
 
             # 생성 실패 케이스 스킵

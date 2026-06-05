@@ -62,18 +62,28 @@ SPLIT_MAP = {
 
 # ── Thinking 후처리 ──────────────────────────────────────────────────────
 
-# 1) 정식 <think>...</think> 블록 제거
-_RE_THINK_TAG = re.compile(r"<think>.*?</think>", re.DOTALL)
+# 1) 닫힌 <think>...</think> 블록 제거 (정상 thinking 모델: 답이 </think> 뒤)
+_RE_THINK_CLOSED = re.compile(r"<think>.*?</think>", re.DOTALL)
 
-# 2) "Thinking Process:" 스타일의 영어 CoT 제거
-#    한국어 내용(##, 환아/환자, 시간 타임스탬프)이 시작되기 직전까지 제거
+# 2) 안 닫힌 <think> → 끝까지 제거
+#    (qwen35: 답을 먼저 내고 trailing으로 <think>가 붙고 안 닫힘)
+_RE_THINK_OPEN = re.compile(r"<think>.*$", re.DOTALL)
+
+# 3) 태그 없는 영어 CoT가 trailing으로 붙는 경우 → 그 지점부터 끝까지 제거
+#    (qwen35: "...post-op\n\nThinking Process:\n1. Analyze..." 형태)
+_RE_THINK_TRAILING = re.compile(
+    r"\n*\s*(?:Thinking Process|Analyze the Request)\b.*$",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# 4) "Thinking Process:" 스타일 CoT가 맨 앞에 오는 경우 → 한국어 본문 직전까지 제거
 _RE_THINK_PREAMBLE = re.compile(
     r"^\s*(?:Thinking Process|Analyze the Request|Analysis|Step \d|<think>).*?"
     r"(?=(?:##|환아|환자|\*\*환자|소아|▶|\d{2}:\d{2}|특이사항))",
     re.DOTALL | re.IGNORECASE,
 )
 
-# 3) 학습 데이터 오염 패턴
+# 5) 학습 데이터 오염 패턴
 _RE_JUNK = re.compile(
     r"Name:\s*\d+,\s*dtype:\s*\w+|"
     r"^(?:assistant|user)\s*$|"
@@ -81,25 +91,26 @@ _RE_JUNK = re.compile(
     re.MULTILINE,
 )
 
-# 4) Qwen3 thinking 후 출력의 앞부분 잘린 패턴
-#    (예: "* 환아는 CASK..."처럼 drafting 도중 잘린 경우)
-_RE_INCOMPLETE_BULLET = re.compile(r"^\s*\*\s+[가-힣]", re.MULTILINE)
-
 
 def clean_output(text: str) -> str:
     """
     Thinking 블록 및 오염 패턴을 제거하고 실제 한국어 인계요약만 반환.
     원본은 generated_raw에 보존, 이 함수 결과는 generated 필드에 저장됨.
+
+    순서 중요:
+      1) 닫힌 <think>..</think> 먼저 제거 (그래야 그 뒤 본문 보존)
+      2) 남은 안 닫힌 <think> → 끝까지 제거
+      3) 태그 없는 trailing CoT 제거
     """
-    text = _RE_THINK_TAG.sub("", text)
+    text = _RE_THINK_CLOSED.sub("", text)
+    text = _RE_THINK_OPEN.sub("", text)
+    text = _RE_THINK_TRAILING.sub("", text)
     text = _RE_JUNK.sub("", text)
     text = _RE_THINK_PREAMBLE.sub("", text, count=1)
 
-    # 남은 내용이 없거나 의미없는 단편이면 명시
     cleaned = text.strip()
     if len(cleaned) < 5:
         cleaned = "[생성 실패: 출력 없음]"
-
     return cleaned
 
 
