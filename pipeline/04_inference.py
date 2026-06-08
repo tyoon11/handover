@@ -13,6 +13,25 @@ _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 import sys, os, argparse, re
 
 
+def _ensure_conda_libstdcxx():
+    """vLLM/zmq가 시스템 구버전 libstdc++(GLIBCXX 부족)를 로드해 죽는 문제 방어.
+    conda 환경의 최신 libstdc++가 있으면 LD_PRELOAD에 추가 → vLLM 하위 프로세스가 상속.
+    이미 설정돼 있거나 conda lib이 없으면 no-op."""
+    prefix = os.environ.get("CONDA_PREFIX")
+    if not prefix:
+        return
+    libpath = os.path.join(prefix, "lib", "libstdc++.so.6")
+    if not os.path.exists(libpath):
+        return
+    cur = os.environ.get("LD_PRELOAD", "")
+    if libpath in cur:
+        return
+    os.environ["LD_PRELOAD"] = (libpath + ":" + cur).rstrip(":")
+
+
+_ensure_conda_libstdcxx()
+
+
 def _early_parse():
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--gpus", type=str, default=None)
