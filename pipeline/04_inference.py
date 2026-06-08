@@ -185,6 +185,134 @@ def apply_chat_template_safe(tokenizer, msgs: list, enable_thinking: bool) -> st
     return tokenizer.apply_chat_template(msgs, **kwargs)
 
 
+# ── vLLM 경로 (tensor parallel — 31B 등 대형/다GPU에서 수십배 빠름) ────────
+
+
+def _merge_lora_for_vllm(model_path: str, base_model: str) -> str:
+    """PEFT 어댑터면 base와 merge해서 임시 dir에 저장 후 그 경로 반환 (캐시).
+    vLLM은 merged full model을 로드. CPU에서 merge해 GPU는 vLLM이 독점."""
+    adapter = Path(model_path) / "adapter_config.json"
+    if not adapter.exists():
+        return model_path  # 이미 full model
+    if not base_model:
+        raise ValueError("PEFT 체크포인트인데 --base_model 미지정")
+
+    merged = Path(model_path) / "_merged_for_vllm"
+    if (merged / "config.json").exists():
+        print(f"  merged 캐시 사용: {merged}")
+        return str(merged)
+
+    print(f"  LoRA merge 중 (CPU)... base={base_model}")
+    tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    base = AutoModelForCausalLM.from_pretrained(
+        base_model, dtype=torch.bfloat16, device_map="cpu",
+        low_cpu_mem_usage=True, trust_remote_code=True,
+    )
+    m = PeftModel.from_pretrained(base, model_path)
+    m = m.merge_and_unload()
+    merged.mkdir(parents=True, exist_ok=True)
+    m.save_pretrained(str(merged))
+    tok.save_pretrained(str(merged))
+    del m, base
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    print(f"  merge 완료: {merged}")
+    return str(merged)
+
+
+def run_inference_vllm(args) -> bool:
+    """vLLM tensor-parallel 배치 추론. 성공 True, 미설치/실패 False(→HF fallback)."""
+    try:
+        from vllm import LLM, SamplingParams
+    except ImportError:
+        print("  [vLLM] 미설치 → HF 경로로 fallback")
+        return False
+
+    split_pkl = SPLIT_MAP[args.split]
+    tag = args.out_tag if args.out_tag else Path(args.model_path).name
+    out_dir = INFER_OUT / tag
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = out_dir / f"{args.split}_results.jsonl"
+
+    n_gpu = torch.cuda.device_count()
+    df = pd.read_pickle(split_pkl)
+    with open(VITAL_MAP_PKL, "rb") as f:
+        vital_map = pickle.load(f)
+
+    print(f"\n[Inference · vLLM]")
+    print(f"  모델:   {args.model_path}")
+    print(f"  Split:  {args.split}  ({split_pkl.name})  데이터 {len(df)}건")
+    print(f"  GPU:    {n_gpu}개 (tensor_parallel)")
+
+    try:
+        model_dir = _merge_lora_for_vllm(args.model_path, args.base_model)
+    except Exception as e:
+        print(f"  [vLLM] merge 실패: {e} → HF fallback")
+        return False
+
+    tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    is_thinking_arch = is_thinking_model(args.base_model or args.model_path, tokenizer)
+    enable_thinking = args.thinking if args.thinking is not None else INFER_ENABLE_THINKING
+    cfg = INFER_CONFIG_THINKING if (is_thinking_arch and enable_thinking) else INFER_CONFIG
+
+    # 프롬프트 일괄 생성
+    prompts, metas = [], []
+    for i, (_, row) in enumerate(df.iterrows()):
+        emr = build_emr_text(row)
+        try:
+            v = row["수술 ID"]
+            sid = int(v.iloc[0]) if hasattr(v, "iloc") else int(v)
+        except Exception:
+            sid = -1
+        vital = vital_map.get(sid, "")
+        user = build_user_prompt(emr, vital)
+        msgs = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user},
+        ]
+        prompts.append(apply_chat_template_safe(tokenizer, msgs, enable_thinking))
+        metas.append((i, sid))
+
+    try:
+        llm = LLM(
+            model=model_dir,
+            tensor_parallel_size=n_gpu,
+            dtype="bfloat16",
+            gpu_memory_utilization=0.90,
+            max_model_len=4096,
+            trust_remote_code=True,
+        )
+    except Exception as e:
+        print(f"  [vLLM] 모델 로드 실패({type(e).__name__}: {e}) → HF fallback")
+        return False
+
+    sp_kwargs = dict(max_tokens=cfg["max_new_tokens"])
+    if cfg.get("do_sample"):
+        sp_kwargs["temperature"] = cfg.get("temperature", 0.7)
+        if cfg.get("top_p") is not None:
+            sp_kwargs["top_p"] = cfg["top_p"]
+    else:
+        sp_kwargs["temperature"] = 0.0
+    sampling = SamplingParams(**sp_kwargs)
+
+    print(f"  배치 생성 시작 ({len(prompts)}건)...")
+    outputs = llm.generate(prompts, sampling)
+
+    with open(out_file, "w", encoding="utf-8") as fout:
+        for (i, sid), out in zip(metas, outputs):
+            raw = out.outputs[0].text.strip()
+            cleaned = clean_output(raw)
+            rec = {"idx": i, "sid": sid, "generated_raw": raw, "generated": cleaned}
+            fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    print(f"\n[완료·vLLM] {len(df)}건 저장: {out_file}")
+    return True
+
+
 # ── 메인 ────────────────────────────────────────────────────────────────
 
 
@@ -332,4 +460,20 @@ if __name__ == "__main__":
     parser.add_argument(
         "--gpus", type=str, default=None, help="사용할 GPU 번호. 예: '0' 또는 '0,1'"
     )
-    run_inference(parser.parse_args())
+    parser.add_argument(
+        "--engine", choices=["auto", "vllm", "hf"], default="auto",
+        help="추론 엔진. auto=vLLM 가능하면 사용(전 GPU tensor parallel), 실패 시 HF. "
+             "hf=기존 transformers(느림). vllm=vLLM 강제.",
+    )
+    _args = parser.parse_args()
+
+    # vLLM 우선 (auto/vllm), 실패하면 HF로 fallback
+    if _args.engine in ("auto", "vllm"):
+        ok = run_inference_vllm(_args)
+        if ok:
+            sys.exit(0)
+        if _args.engine == "vllm":
+            print("[오류] --engine vllm 강제인데 vLLM 실행 실패")
+            sys.exit(1)
+        print("[fallback] HF transformers 경로로 실행")
+    run_inference(_args)
