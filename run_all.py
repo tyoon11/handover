@@ -106,6 +106,12 @@ class GpuPool:
 
 
 # ── 경로 헬퍼 ─────────────────────────────────────────────────────────────
+def _ckpt_exists(d: Path) -> bool:
+    """학습 체크포인트 유효성: PEFT(adapter_config.json) 또는 full(config.json)."""
+    d = Path(d)
+    return (d / "adapter_config.json").exists() or (d / "config.json").exists()
+
+
 def _infer_path(model: str, exp_key: str) -> Path:
     return INFER_OUT / f"{model}_{exp_key}" / "gold_results.jsonl"
 
@@ -164,11 +170,10 @@ def _execute_exp(
     # ── SFT ──────────────────────────────────────────────────────────────
     if not only_eval and sft_ep is not None:
         sft_final = SFT_OUT / f"{model}_{sft_ep}ep" / "final"
-        # 체크포인트가 이미 있으면 항상 스킵 (병렬 dep 처리 포함)
-        if (sft_final / "config.json").exists():
+        # PEFT는 adapter_config.json, full model은 config.json — 둘 중 하나 있으면 완료.
+        # 체크포인트가 실제로 있을 때만 스킵 (skip_done이어도 없으면 반드시 학습).
+        if _ckpt_exists(sft_final):
             log(f"  [SKIP] [{tag}] SFT {sft_ep}ep (체크포인트 존재)")
-        elif skip_done:
-            log(f"  [SKIP] [{tag}] SFT {sft_ep}ep")
         else:
             ok = _run(
                 [py, "pipeline/02_sft_train.py", "--base", model, "--epochs", str(sft_ep)],
@@ -183,13 +188,17 @@ def _execute_exp(
             ep = sft_dep_key.split("_")[1].replace("ep", "")  # "sft_1ep" → "1"
             sft_ckpt = str(SFT_OUT / f"{model}_{ep}ep" / "final")
             rlaif_tag = f"{model}_sft{ep}ep_{rlaif_loss}"  # "llama_sft1ep_dpo"
+            # 선행 SFT 체크포인트가 없으면 RLAIF 불가 → 깔끔히 실패
+            if not _ckpt_exists(Path(sft_ckpt)):
+                log(f"  [실패] [{tag}] 선행 SFT 체크포인트 없음: {sft_ckpt}")
+                return False
         else:
             sft_ckpt = None
             rlaif_tag = f"{model}_raw_{rlaif_loss}"  # "llama_raw_dpo"
 
         rlaif_final = RLAIF_OUT / rlaif_tag / "final"
-        if skip_done and (rlaif_final / "config.json").exists():
-            log(f"  [SKIP] [{tag}] RLAIF {rlaif_loss}")
+        if _ckpt_exists(rlaif_final):
+            log(f"  [SKIP] [{tag}] RLAIF {rlaif_loss} (체크포인트 존재)")
         else:
             cmd = [py, "pipeline/03_rlaif_train.py", "--base", model, "--loss", rlaif_loss]
             if sft_ckpt:
@@ -204,6 +213,10 @@ def _execute_exp(
         log(f"  [SKIP] [{tag}] Inference")
     else:
         ckpt = str(_ckpt(model, exp_key))
+        # raw가 아닌데 학습 체크포인트가 없으면 추론 불가 → repo-id 에러 방지
+        if exp_key != "raw" and not _ckpt_exists(Path(ckpt)):
+            log(f"  [실패] [{tag}] 추론용 체크포인트 없음: {ckpt}")
+            return False
         cmd = [
             py,
             "pipeline/04_inference.py",
