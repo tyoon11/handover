@@ -114,63 +114,47 @@ class JudgeAugmentedSFTCollator:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def _chat(system, user, assistant, tokenizer, is_qwen: bool = False) -> str:
-    msgs = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-        {"role": "assistant", "content": assistant},
-    ]
+def _apply_template(msgs, tokenizer, is_qwen: bool, add_generation_prompt: bool) -> str:
+    kwargs = dict(tokenize=False, add_generation_prompt=add_generation_prompt)
     if is_qwen:
         try:
-            return tokenizer.apply_chat_template(
-                msgs, tokenize=False, enable_thinking=False
-            )
+            return tokenizer.apply_chat_template(msgs, enable_thinking=False, **kwargs)
         except TypeError:
             pass
-    return tokenizer.apply_chat_template(msgs, tokenize=False)
+    return tokenizer.apply_chat_template(msgs, **kwargs)
 
 
-def _tokenize_with_labels(
-    text: str,
-    tokenizer,
-    resp_template_ids: List[int],
-) -> dict:
-    """전체 텍스트를 토크나이즈하고, assistant 응답 토큰에만 label을 부여.
+def _make_example(system, user, assistant, tokenizer, is_qwen: bool) -> dict:
+    """프롬프트 길이 기반 라벨 마스킹 — 응답 토큰에만 loss.
 
-    assistant template 마지막 출현 이후 토큰만 loss에 포함(label≠-100).
-    judge 샘플의 경우 응답이 "A" 또는 "B" 단일 토큰이므로 해당 토큰만 학습됨.
+    하드코딩 템플릿 문자열 검색(모델마다 깨짐, gemma loss=0 원인) 대신
+    prompt(system+user, add_generation_prompt=True)를 따로 토크나이즈해
+    그 길이만큼만 -100 마스킹하고 나머지(assistant 응답)에 label 부여.
+    모든 chat 모델에서 안전.
     """
-    input_ids = tokenizer(text, add_special_tokens=False, truncation=False)["input_ids"]
+    sys_user = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    full = sys_user + [{"role": "assistant", "content": assistant}]
 
-    # resp_template_ids의 마지막 출현 위치 탐색
-    n = len(resp_template_ids)
-    response_start = None
-    for i in range(len(input_ids) - n, -1, -1):
-        if input_ids[i : i + n] == resp_template_ids:
-            response_start = i + n
-            break
+    prompt_text = _apply_template(sys_user, tokenizer, is_qwen, add_generation_prompt=True)
+    full_text = _apply_template(full, tokenizer, is_qwen, add_generation_prompt=False)
 
-    if response_start is None or response_start >= len(input_ids):
-        # template을 찾지 못하면 전체 마스킹 (loss 미반영)
-        labels = [-100] * len(input_ids)
-    else:
-        labels = [-100] * response_start + input_ids[response_start:]
+    pids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
+    fids = tokenizer(full_text, add_special_tokens=False)["input_ids"]
 
-    return {"input_ids": input_ids, "labels": labels}
+    # prompt가 full의 prefix가 아니면(경계 토큰 머지 등) 공통 prefix 길이로 보정
+    plen = len(pids)
+    if fids[:plen] != pids:
+        plen = 0
+        for a, b in zip(pids, fids):
+            if a != b:
+                break
+            plen += 1
 
-
-def _get_resp_template_ids(base: str, tokenizer) -> List[int]:
-    """모델별 assistant 응답 시작 template 토큰 ID 목록."""
-    templates = {
-        "llama": "<|start_header_id|>assistant<|end_header_id|>",
-        "qwen": "<|im_start|>assistant\n",
-        "qwen35": "<|im_start|>assistant\n",
-        "hari": "<|im_start|>assistant\n",
-        "gemma4": "<start_of_turn>model\n",
-        "gemma4_31b": "<start_of_turn>model\n",
-    }
-    tmpl = templates.get(base, "<|im_start|>assistant\n")
-    return tokenizer.encode(tmpl, add_special_tokens=False)
+    labels = [-100] * plen + fids[plen:]
+    return {"input_ids": fids, "labels": labels}
 
 
 def build_dataset(synth_df, vital_map, tokenizer, base: str) -> Dataset:
@@ -180,7 +164,6 @@ def build_dataset(synth_df, vital_map, tokenizer, base: str) -> Dataset:
     - generation 샘플: chosen 인계문 전체에 loss
     - judge 샘플: "A" 또는 "B" 단일 토큰에만 loss (원본 JudgeAugmented 방식)
     """
-    resp_template_ids = _get_resp_template_ids(base, tokenizer)
     is_qwen = base in ("qwen", "qwen35", "hari")
     examples = []
     no_vital = 0
@@ -201,26 +184,37 @@ def build_dataset(synth_df, vital_map, tokenizer, base: str) -> Dataset:
         rejected = str(row.get("rejected", ""))
 
         # (1) generation: chosen 인계문 전체에 loss
-        text = _chat(SYSTEM_PROMPT, user_base, chosen, tokenizer, is_qwen)
-        examples.append(_tokenize_with_labels(text, tokenizer, resp_template_ids))
+        examples.append(_make_example(SYSTEM_PROMPT, user_base, chosen, tokenizer, is_qwen))
 
         # (2) judge: A=chosen, B=rejected → 정답 "A"
         judge_user = (
             "Evaluate which of the following PACU/ICU handoffs is better. No reasoning.\n\n"
             f"EMR:\n{user_base}\n\nAssistant A: {chosen}\n\nAssistant B: {rejected}"
         )
-        text = _chat(SYSTEM_PROMPT, judge_user, "A", tokenizer, is_qwen)
-        examples.append(_tokenize_with_labels(text, tokenizer, resp_template_ids))
+        examples.append(_make_example(SYSTEM_PROMPT, judge_user, "A", tokenizer, is_qwen))
 
         # (3) judge: A=rejected, B=chosen → 정답 "B"
         judge_user2 = (
             "Evaluate which of the following PACU/ICU handoffs is better. No reasoning.\n\n"
             f"EMR:\n{user_base}\n\nAssistant A: {rejected}\n\nAssistant B: {chosen}"
         )
-        text = _chat(SYSTEM_PROMPT, judge_user2, "B", tokenizer, is_qwen)
-        examples.append(_tokenize_with_labels(text, tokenizer, resp_template_ids))
+        examples.append(_make_example(SYSTEM_PROMPT, judge_user2, "B", tokenizer, is_qwen))
 
     print(f"  총 샘플: {len(examples)}개  (vital 없는 케이스: {no_vital}건)")
+
+    # 라벨 마스킹 sanity check — 학습 토큰이 0이면 loss=0(학습 안 됨) → 즉시 중단
+    n_trainable = sum(
+        sum(1 for l in ex["labels"] if l != -100) for ex in examples
+    )
+    n_with_labels = sum(
+        1 for ex in examples if any(l != -100 for l in ex["labels"])
+    )
+    print(f"  학습 토큰: {n_trainable}개,  라벨 있는 샘플: {n_with_labels}/{len(examples)}")
+    if n_trainable == 0 or n_with_labels == 0:
+        raise RuntimeError(
+            "[라벨 마스킹 실패] 학습 토큰이 0개 — 전 샘플이 마스킹됨. "
+            "chat template/프롬프트 구성 확인 필요 (loss=0 방지)."
+        )
     return Dataset.from_list(examples)
 
 
