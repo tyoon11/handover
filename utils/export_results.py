@@ -26,8 +26,24 @@ import pandas as pd
 from config import (
     OUTPUT_BASE, EVAL_OUT, INFER_OUT,
     GOLD_PKL, VITAL_MAP_PKL, GOLD_REF_XLSX,
+    SFT_MODELS,
     build_emr_text, build_user_prompt,
 )
+
+# 폴더명(f"{model}_{exp_key}")에서 model/exp 분리.
+# model 키 자체에 '_'가 있을 수 있어(gemma4_31b) 단순 split이 아니라
+# 알려진 모델 키 중 긴 것부터 prefix 매칭한다.
+_MODEL_KEYS = sorted(SFT_MODELS.keys(), key=len, reverse=True)
+
+
+def _split_tag(tag: str):
+    for mk in _MODEL_KEYS:
+        if tag == mk:
+            return mk, "?"
+        if tag.startswith(mk + "_"):
+            return mk, tag[len(mk) + 1:]
+    parts = tag.split("_", 1)
+    return parts[0], (parts[1] if len(parts) > 1 else "?")
 
 
 def _avg(values):
@@ -135,9 +151,7 @@ def collect_results(eval_out: Path):
             continue
 
         tag = score_file.parent.name
-        parts = tag.split("_", 1)
-        model = parts[0]
-        exp_key = parts[1] if len(parts) > 1 else "?"
+        model, exp_key = _split_tag(tag)
 
         lines = [json.loads(l) for l in score_file.read_text().splitlines() if l.strip()]
         if not lines:

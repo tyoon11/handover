@@ -1,0 +1,29 @@
+# ── OS / 에디터 junk ──────────────────────────────────────────────
+.DS_Store
+*.swp
+
+# ── Python ────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# ── Claude Code 로컬 설정 ─────────────────────────────────────────
+.claude/
+
+# ── 데이터 / 모델 산출물 (PHI 포함 가능 — 절대 push 금지) ─────────
+*.pkl
+*.xlsx
+*.csv
+outputs/
+models/
+checkpoints/
+
+# ── 생성된 검토 산출물 (환자 EMR/vital 원문 포함) ─────────────────
+results_cases.html
+results_cases.md
+results_notion.md
+results.csv
+
+# ── 인계용 패키지 (EDA 노트북에 실제 수술ID 포함 — PHI) ───────────
+HANDOVER_인계용_다린/
