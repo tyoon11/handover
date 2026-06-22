@@ -72,6 +72,14 @@ from config import (
     INFER_ENABLE_THINKING,
 )
 
+# ── v2 생성 위생 (개선안 4) — opt-in. 기본(v1) 동작은 그대로 보존 ───────────
+# --decode v2 지정 시: repetition_penalty/no_repeat_ngram + clean_v2 정제 사용.
+_DECODE_V2 = dict(repetition_penalty=1.15, no_repeat_ngram_size=4)
+try:
+    from pipeline.eval_v2.engine import clean_v2 as _clean_v2
+except Exception:
+    _clean_v2 = None
+
 SPLIT_MAP = {
     "sft": SFT_PKL,
     "selfjudge": SELFJUDGE_PKL,
@@ -316,16 +324,24 @@ def run_inference_vllm(args) -> bool:
             sp_kwargs["top_p"] = cfg["top_p"]
     else:
         sp_kwargs["temperature"] = 0.0
+    if getattr(args, "decode", "v1") == "v2":
+        sp_kwargs["repetition_penalty"] = _DECODE_V2["repetition_penalty"]
     sampling = SamplingParams(**sp_kwargs)
 
     print(f"  배치 생성 시작 ({len(prompts)}건)...")
     outputs = llm.generate(prompts, sampling)
 
+    use_v2 = getattr(args, "decode", "v1") == "v2" and _clean_v2 is not None
     with open(out_file, "w", encoding="utf-8") as fout:
         for (i, sid), out in zip(metas, outputs):
             raw = out.outputs[0].text.strip()
-            cleaned = clean_output(raw)
+            if use_v2:
+                cleaned, status = _clean_v2(raw)
+            else:
+                cleaned, status = clean_output(raw), None
             rec = {"idx": i, "sid": sid, "generated_raw": raw, "generated": cleaned}
+            if status is not None:
+                rec["gen_status"] = status
             fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     print(f"\n[완료·vLLM] {len(df)}건 저장: {out_file}")
@@ -419,6 +435,9 @@ def run_inference(args):
                     gen_kwargs["temperature"] = cfg["temperature"]
                 if cfg.get("top_p") is not None and cfg.get("do_sample"):
                     gen_kwargs["top_p"] = cfg["top_p"]
+                if getattr(args, "decode", "v1") == "v2":
+                    gen_kwargs["repetition_penalty"] = _DECODE_V2["repetition_penalty"]
+                    gen_kwargs["no_repeat_ngram_size"] = _DECODE_V2["no_repeat_ngram_size"]
                 output_ids = model.generate(**inputs, **gen_kwargs)
 
             raw = tokenizer.decode(
@@ -427,7 +446,10 @@ def run_inference(args):
             ).strip()
 
             # thinking 블록 제거 (thinking ON/OFF 관계없이 항상 적용 — 방어적 처리)
-            cleaned = clean_output(raw)
+            if getattr(args, "decode", "v1") == "v2" and _clean_v2 is not None:
+                cleaned, status = _clean_v2(raw)
+            else:
+                cleaned, status = clean_output(raw), None
 
             rec = {
                 "idx": i,
@@ -435,6 +457,8 @@ def run_inference(args):
                 "generated_raw": raw,  # thinking 포함 원본 (분석용)
                 "generated": cleaned,  # 정제본 (judge용)
             }
+            if status is not None:
+                rec["gen_status"] = status
             fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     print(f"\n[완료] {len(df)}건 저장: {out_file}")
@@ -478,6 +502,11 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--gpus", type=str, default=None, help="사용할 GPU 번호. 예: '0' 또는 '0,1'"
+    )
+    parser.add_argument(
+        "--decode", choices=["v1", "v2"], default="v1",
+        help="생성 위생(개선안 4). v2=repetition_penalty/no_repeat_ngram + clean_v2 정제"
+             "(빈/반복/잘림을 gen_status로 기록). 기본 v1은 기존 동작 보존.",
     )
     parser.add_argument(
         "--engine", choices=["auto", "vllm", "hf"], default="auto",

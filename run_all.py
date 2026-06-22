@@ -229,6 +229,10 @@ def _execute_exp(
         ]
         if exp_key != "raw":
             cmd += ["--base_model", str(SFT_MODELS[model])]
+        # v2 오케스트레이터(run_all_v2)가 생성 위생을 켤 때만 주입 (기본 v1 보존)
+        _decode = os.environ.get("HANDOVER_INFER_DECODE")
+        if _decode in ("v1", "v2"):
+            cmd += ["--decode", _decode]
         ok = _run(cmd, "Inference")
         if not ok:
             return False
