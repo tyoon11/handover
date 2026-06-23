@@ -76,44 +76,45 @@ def inspect_xlsx(xlsx_path, hints):
     return df
 
 
-# ── LLM 추출 프롬프트 ───────────────────────────────────────────────────────
+# ── LLM 추출 프롬프트 (교수님 gold=c10 을 '정답'으로 구조화) ─────────────────
+# 핵심: checklist 항목은 '교수님 gold가 담은 것'만. EMR은 약어 풀이/근거 인용에만 쓰고
+#       gold에 없는 소견(특히 QTc·일시적 desat·혈압 이벤트 카운트 등 vital 파생)은 추가 금지.
 _EXTRACT_SYSTEM = (
-    "You are a pediatric anesthesiologist building a PACU/ICU handoff safety checklist. "
-    "From the EMR (and an optional reference handoff), extract ONLY clinically actionable "
-    "abnormalities that the receiving team must know after surgery. "
-    "Exclude normal/stable findings, routine drug totals, surgery steps, and administrative text. "
-    "Output strict JSON only."
+    "You convert a senior anesthesiologist's authoritative gold handoff into a structured "
+    "checklist of key points a model handoff MUST cover. The gold is the ground truth for WHAT "
+    "matters. Use the EMR only to expand abbreviations and to quote a short source span. "
+    "CRITICAL: do NOT add any finding the gold did not include — in particular do NOT add QTc "
+    "prolongation, transient desaturation, or blood-pressure/heart-rate event counts unless the "
+    "gold explicitly mentions them. If the gold says only 'no issue'(특이사항 없음), return "
+    "is_normal_case=true with items=[] (but keep an airway-device note as a low item if the gold "
+    "mentions one). Output strict JSON only."
 )
 
-_EXTRACT_TMPL = """다음 소아 마취 EMR(+vital 요약)과 참고 인계문을 보고, 수술 후 PACU/ICU 인계 시
-반드시 전달해야 할 '조치 가능한 이상소견(actionable abnormality)'만 추출하세요.
+_EXTRACT_TMPL = """아래 '교수님 gold 인계문'을 정답으로 삼아, 모델 인계문이 반드시 cover해야 할
+핵심 항목(checklist)으로 구조화하세요.
 
 규칙:
-- 정상/안정 소견, 일상적 약물 총량, 수술 단계, 행정 문구는 제외.
-- 항목이 하나도 없으면 is_normal_case=true, items=[].
-- category는 다음 중 하나: airway, respiratory, hemodynamics, bleeding_transfusion,
-  congenital_major_disease, intraop_event, drug_effect, lines_devices, cooperation_agitation, other
-- severity는 high/medium/low.
-- source는 EMR/vital에서 그 근거가 된 짧은 원문 인용.
+- 항목 집합 = '교수님 gold가 담은 내용'만. gold에 없는 소견은 절대 추가하지 마세요
+  (특히 QTc 연장, 일시적 SpO2 저하, 혈압/심박수 이벤트 횟수 등 vital 파생 항목 금지).
+- EMR은 약어 풀이와 source 인용에만 사용.
+- gold가 'AuraGain 사용, 특이사항 없음'처럼 device만 언급하면 그 device를 low 항목 1개로,
+  나머지는 is_normal_case 판단.
+- gold가 사실상 '특이사항 없음'뿐이면 is_normal_case=true, items=[].
+- category: airway, respiratory, hemodynamics, bleeding_transfusion, congenital_major_disease,
+  intraop_event, drug_effect, lines_devices, cooperation_agitation, other
+- severity: high/medium/low. source: EMR에서 근거가 된 짧은 원문(없으면 gold 인용).
 
-아래 JSON 스키마로만 출력:
+JSON만 출력:
 {{"is_normal_case": <bool>, "items": [{{"id":"c1","finding":"...","category":"...","severity":"...","source":"..."}}]}}
 
-### EMR + VITAL
-{premise}
+### 교수님 gold 인계문 (정답)
+{gold}
 
-### 참고 인계문 (정답 아님, 보조용)
-{reference}
+### EMR (약어 풀이/근거 인용용 — 새 소견 추가 금지)
+{emr}
 
 ### JSON
 """
-
-
-def _premise(gold_df, vital_map, idx, sid):
-    row = gold_df.iloc[idx] if idx < len(gold_df) else None
-    emr = build_emr_text(row) if row is not None else ""
-    vital = vital_map.get(sid, "")
-    return build_user_prompt(emr, vital)
 
 
 def _opname(gold_df, idx):
@@ -124,57 +125,67 @@ def _opname(gold_df, idx):
         return "-"
 
 
-def build_checklist(engine, gold_df, vital_map, references=None):
-    """gold 전체 케이스에 대해 LLM으로 actionable checklist 부트스트랩.
-    references: {idx: 참고인계문str} (xlsx 전문의 인계문 등). 없으면 빈 문자열."""
-    references = references or {}
+def build_checklist(engine, gold_df, vital_map, gold_refs, context_refs=None):
+    """교수님 gold(c10)를 정답으로 checklist 구조화.
+    gold_refs    : {idx: 교수님 gold(c10) text}  ← 항목의 출처(정답)
+    context_refs : {idx: gemma 원안(c9) 등}      ← (현재 미사용, 확장 여지)
+    gold가 빈 케이스는 source='no_gold'로 표시하고 수기 작성 대상으로 남긴다."""
+    gold_refs = gold_refs or {}
+    from config_v2 import is_no_issue
+
     idxs, sids, prompts = [], [], []
+    checklist = {}
     for idx in range(len(gold_df)):
         try:
             sid = int(gold_df.iloc[idx]["수술 ID"].iloc[0]) if hasattr(
                 gold_df.iloc[idx]["수술 ID"], "iloc") else int(gold_df.iloc[idx]["수술 ID"])
         except Exception:
             sid = -1
-        premise = _premise(gold_df, vital_map, idx, sid)
-        ref = references.get(idx, "") or "(참고 인계문 없음)"
-        prompts.append(_EXTRACT_TMPL.format(premise=premise, reference=ref))
-        idxs.append(idx)
-        sids.append(sid)
+        gold = (gold_refs.get(idx) or "").strip()
+        base = {"idx": idx, "sid": sid, "opname": _opname(gold_df, idx),
+                "gold_text": gold, "reviewed": False}
 
-    parsed = engine.chat_json(prompts, system=_EXTRACT_SYSTEM, want="obj", retries=2)
+        if not gold:
+            # 교수님 gold 없음 → 수기 작성 필요 (예: idx 12 Crouzon, c10 입력 누락)
+            checklist[str(sid)] = {**base, "is_normal_case": False, "items": [],
+                                   "source": "no_gold", "needs_manual": True}
+            continue
+        if is_no_issue(gold):
+            checklist[str(sid)] = {**base, "is_normal_case": True, "items": [],
+                                   "source": "gold_normal"}
+            continue
 
-    checklist = {}
+        row = gold_df.iloc[idx] if idx < len(gold_df) else None
+        emr = build_emr_text(row) if row is not None else ""
+        prompts.append(_EXTRACT_TMPL.format(gold=gold, emr=emr))
+        idxs.append(idx); sids.append(sid)
+        checklist[str(sid)] = {**base, "_pending": True}
+
+    parsed = engine.chat_json(prompts, system=_EXTRACT_SYSTEM, want="obj", retries=2) \
+        if prompts else []
+
     for idx, sid, pj in zip(idxs, sids, parsed):
-        items = []
-        is_normal = False
+        entry = checklist[str(sid)]
+        entry.pop("_pending", None)
+        items, is_normal = [], False
         if isinstance(pj, dict):
             is_normal = bool(pj.get("is_normal_case", False))
-            raw_items = pj.get("items", []) or []
-            for k, it in enumerate(raw_items):
+            for k, it in enumerate(pj.get("items", []) or []):
                 if not isinstance(it, dict):
+                    continue
+                fnd = str(it.get("finding", "")).strip()
+                if not fnd:
                     continue
                 items.append({
                     "id": it.get("id") or f"c{k+1}",
-                    "finding": str(it.get("finding", "")).strip(),
+                    "finding": fnd,
                     "category": it.get("category", "other"),
                     "severity": it.get("severity", "medium"),
                     "source": str(it.get("source", "")).strip(),
                 })
-            items = [it for it in items if it["finding"]]
-        else:
-            # 파싱 실패 → 보수적으로 normal=false, 빈 items + 플래그
-            is_normal = False
-        if not items:
-            is_normal = True if (isinstance(pj, dict) and pj.get("is_normal_case")) else is_normal
-        checklist[str(sid)] = {
-            "idx": idx,
-            "sid": sid,
-            "opname": _opname(gold_df, idx),
-            "is_normal_case": is_normal and not items,
-            "items": items,
-            "source": "llm_bootstrap" if pj is not None else "llm_failed",
-            "reviewed": False,
-        }
+        entry["items"] = items
+        entry["is_normal_case"] = bool(is_normal and not items)
+        entry["source"] = "gold_llm" if pj is not None else "gold_llm_failed"
     return checklist
 
 

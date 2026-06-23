@@ -49,14 +49,17 @@ v1은 원본 노트북을 충실히 이식했고, 그래서 원본의 **설계 �
 
 `build_gold_checklist.py` → `data/preprocessed/gold_checklist_v2.json`
 
-**gold 소스 우선순위**: `KHS c10 피드백` > `SY col6` > `EMR-only`
+**gold 소스 = KHS c10(교수님 피드백)만 사용** (SY는 gold에서 제외):
 - `인계요약지_gold_sampled_251002_KHS.xlsx`('데이터' 시트, 다중헤더 3행, 케이스당 1행):
-  - c9 `인계요약지_sample_from_LLM` = gemma-3-27b-it 원안(정답 아님, 피드백 '대상')
-  - **c10 = 교수님이 c9를 보고 준 피드백/수정본 = 진짜 gold(1순위)**
-  - c11 `인계요약지` = 거의 공란(사용 안 함)
-  - → checklist 추출 시 **c10(gold) + c9(원안)을 함께** 넘겨 피드백 맥락 보존.
-- `인계요약지_SY.xlsx`(col6) = 보조 gold + 전문의 평가점수 168행(calibration용).
-- 위를 병합해 gemma-4-31B가 케이스별 actionable finding을 구조화 추출(JSON).
+  - c9 `인계요약지_sample_from_LLM` = gemma-3-27b-it 원안(정답 아님)
+  - **c10 = 교수님이 c9를 보고 준 피드백 = 진짜 gold** ← checklist 항목의 유일한 출처
+  - c11 `인계요약지` = 거의 공란(미사용)
+- **추출 원칙(중요)**: checklist 항목 집합 = *교수님 gold가 담은 것만*. EMR은 약어 풀이/근거
+  인용에만 쓰고, **gold에 없는 소견(특히 QTc 연장·일시적 desat·혈압/심박 이벤트 카운트 등
+  vital 파생)은 추가 금지**. (1차 부트스트랩이 QTc를 13/22 케이스에 과다 포함시킨 문제를 교정.)
+- gold가 '특이사항 없음'이면 `is_normal_case=true`. c10이 공란인 케이스(예: Crouzon —
+  c10이 옆 행에 잘못 입력됨)는 `source:"no_gold"`로 표시하고 **수기 작성 대상**으로 남김.
+- (참고) `인계요약지_SY.xlsx`는 gold로 안 쓰고, 전문의 평가점수 168행만 `--calibrate` 검증에 사용.
 - 각 항목: `{id, finding, category, severity, source}` + 케이스 `is_normal_case`.
 - **전문의가 직접 수정 가능한 JSON.** 검수 후 `reviewed: true`로 바꾸면 정식 기준이 된다.
   (검수 전엔 리포트/로그에 "잠정(LLM 부트스트랩)" 경고 표시.)

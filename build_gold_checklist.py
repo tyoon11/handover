@@ -61,35 +61,16 @@ def do_inspect():
 
 
 def do_build(args):
-    path = gold_sy_path()
     gold_df = pd.read_pickle(GOLD_PKL)
 
-    # gold 소스 로드 — 우선순위: KHS Feedback(진짜 gold) > SY col6 > EMR
-    sy_gold = {}
-    try:
-        sy_gold, _scored = CK.load_sy(path, SY_COLS, SY_HEADER_ROWS)
-    except Exception as e:
-        print(f"[build] SY 로드 실패({e})")
+    # gold 소스 = KHS c10(교수님 피드백)만 사용 (SY 무시).
     khs_gold, khs_draft = {}, {}
-    try:
-        if GOLD_KHS_XLSX.exists():
-            khs_gold, khs_draft = CK.load_khs(
-                GOLD_KHS_XLSX, KHS_SHEET, KHS_COLS, KHS_HEADER_ROWS, gold_df)
-        else:
-            print(f"[build] KHS 파일 없음(스킵): {GOLD_KHS_XLSX}")
-    except Exception as e:
-        print(f"[build] KHS 로드 실패({e})")
-
-    # KHS 참고문 = c10(교수 피드백=gold) + c9(피드백 대상 LLM 원안) 결합
-    khs_ref = {}
-    for idx, fb in khs_gold.items():
-        ref = f"[교수 피드백(gold)]\n{fb}"
-        if idx in khs_draft:
-            ref += f"\n\n[위 피드백이 가리키는 LLM 원안(gemma-3-27b)]\n{khs_draft[idx]}"
-        khs_ref[idx] = ref
-
-    references = CK.merge_references(khs_ref, sy_gold)  # KHS 피드백 우선, 없으면 SY
-    print(f"[build] gold 참고문: KHS {len(khs_ref)} + SY {len(sy_gold)} → 병합 {len(references)}건")
+    if GOLD_KHS_XLSX.exists():
+        khs_gold, khs_draft = CK.load_khs(
+            GOLD_KHS_XLSX, KHS_SHEET, KHS_COLS, KHS_HEADER_ROWS, gold_df)
+    else:
+        print(f"[build] ⚠ KHS 파일 없음: {GOLD_KHS_XLSX}")
+    print(f"[build] 교수님 gold(c10) {len(khs_gold)}건 → 이것만 정답으로 사용")
 
     with open(VITAL_MAP_PKL, "rb") as f:
         vital_map = pickle.load(f)
@@ -97,14 +78,21 @@ def do_build(args):
     from pipeline.eval_v2.engine import EvalEngine
     engine = EvalEngine(EVAL_V2_LLM, backend=args.backend, gen_cfg=EVAL_V2_GEN)
 
-    checklist = CK.build_checklist(engine, gold_df, vital_map, references=references)
+    checklist = CK.build_checklist(engine, gold_df, vital_map,
+                                   gold_refs=khs_gold, context_refs=khs_draft)
     CK.save_checklist(checklist, GOLD_CHECKLIST_JSON)
 
     n_items = sum(len(v["items"]) for v in checklist.values())
-    n_normal = sum(1 for v in checklist.values() if v["is_normal_case"])
+    n_normal = sum(1 for v in checklist.values() if v.get("is_normal_case"))
+    n_nogold = sum(1 for v in checklist.values() if v.get("source") == "no_gold")
     print(f"\n[build] 저장: {GOLD_CHECKLIST_JSON}")
-    print(f"  케이스 {len(checklist)}건, 항목 총 {n_items}개, normal(특이사항없음) {n_normal}건")
-    print("  ⚠ reviewed=false 상태입니다. 전문의가 JSON을 검토/수정 후 reviewed=true로 바꾸세요.")
+    print(f"  케이스 {len(checklist)}건, 항목 총 {n_items}개, "
+          f"normal {n_normal}건, gold없음(수기필요) {n_nogold}건")
+    if n_nogold:
+        miss = [v["sid"] for v in checklist.values() if v.get("source") == "no_gold"]
+        print(f"  ⚠ gold 없는 케이스(c10 공란) sid={miss} — 수기 작성 필요 "
+              f"(예: Crouzon 케이스는 c10이 옆 행에 잘못 입력됨)")
+    print("  ⚠ reviewed=false. 전문의 검토 후 reviewed=true로 바꾸세요.")
 
 
 def do_calibrate(args):
