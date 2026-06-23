@@ -63,18 +63,18 @@ GOLD_CHECKLIST_JSON = DATA_DIR / "preprocessed" / "gold_checklist_v2.json"
 GOLD_SY_XLSX = DATA_DIR / "gold_sampled" / "인계요약지_SY.xlsx"
 GOLD_SY_XLSX_FALLBACK = Path(__file__).resolve().parent / "인계요약지_SY.xlsx"
 
-# ── KHS 엑셀 — '진짜 gold'(교수님 Feedback) 1순위 소스 ──────────────────────
-# '데이터' 시트:
-#   - 인계요약지_sample_from_LLM = gemma-3-27b-it 참고 초안 (정답 아님)
-#   - Feedback                  = 교수님이 직접 작성/수정한 진짜 gold
-# gold 우선순위: KHS Feedback > SY col6 > EMR-only 부트스트랩.
+# ── KHS 엑셀 — '진짜 gold'(교수님 피드백) 1순위 소스 ────────────────────────
+# '데이터' 시트, 다중헤더 3행(데이터는 row3~), 케이스당 1행:
+#   - c9  인계요약지_sample_from_LLM   = gemma-3-27b-it 원안 (정답 아님, 피드백 '대상')
+#   - c10 인계요약지_sample_from_LLM.1 = 교수님이 c9를 보고 준 피드백/수정본 = 진짜 gold
+#   - c11 인계요약지                   = (거의 공란 — 사용 안 함)
+# checklist 추출 시 c10(gold) + c9(원안)을 함께 넘긴다(피드백 맥락 보존).
+# gold 우선순위: KHS c10 피드백 > SY col6 > EMR-only 부트스트랩.
 GOLD_KHS_XLSX = DATA_DIR / "gold_sampled" / "인계요약지_gold_sampled_251002_KHS.xlsx"
 KHS_SHEET = "데이터"
-KHS_COL_HINTS = dict(
-    sid=["수술ID", "수술 ID"],
-    llm_sample=["인계요약지_sample_from_LLM", "sample_from_LLM", "llm"],
-    feedback=["Feedback", "feedback", "교수", "gold"],
-)
+KHS_HEADER_ROWS = 3
+KHS_COLS = dict(idx=0, pid=1, sid=2, dept_list=3, dept=4, recovery=5,
+                anrec=6, preop=7, premed=8, llm=9, feedback=10, newgold=11)
 
 # SY 엑셀 컬럼 위치 (header 3행, 데이터는 row3~). idx·gold는 병합셀이므로 ffill 필요.
 SY_COLS = dict(

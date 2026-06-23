@@ -37,7 +37,7 @@ from config import GOLD_PKL, VITAL_MAP_PKL
 from config_v2 import (
     EVAL_V2_LLM, EVAL_V2_BACKEND, EVAL_V2_GEN,
     GOLD_CHECKLIST_JSON, XLSX_COL_HINTS, SY_COLS, SY_HEADER_ROWS, gold_sy_path,
-    GOLD_KHS_XLSX, KHS_SHEET, KHS_COL_HINTS,
+    GOLD_KHS_XLSX, KHS_SHEET, KHS_COLS, KHS_HEADER_ROWS,
 )
 from pipeline.eval_v2 import checklist as CK
 
@@ -70,17 +70,26 @@ def do_build(args):
         sy_gold, _scored = CK.load_sy(path, SY_COLS, SY_HEADER_ROWS)
     except Exception as e:
         print(f"[build] SY 로드 실패({e})")
-    khs_gold = {}
+    khs_gold, khs_draft = {}, {}
     try:
         if GOLD_KHS_XLSX.exists():
-            khs_gold, _llm = CK.load_khs(GOLD_KHS_XLSX, KHS_SHEET, KHS_COL_HINTS, gold_df)
+            khs_gold, khs_draft = CK.load_khs(
+                GOLD_KHS_XLSX, KHS_SHEET, KHS_COLS, KHS_HEADER_ROWS, gold_df)
         else:
             print(f"[build] KHS 파일 없음(스킵): {GOLD_KHS_XLSX}")
     except Exception as e:
         print(f"[build] KHS 로드 실패({e})")
 
-    references = CK.merge_references(khs_gold, sy_gold)  # KHS 우선
-    print(f"[build] gold 참고문: KHS {len(khs_gold)} + SY {len(sy_gold)} → 병합 {len(references)}건")
+    # KHS 참고문 = c10(교수 피드백=gold) + c9(피드백 대상 LLM 원안) 결합
+    khs_ref = {}
+    for idx, fb in khs_gold.items():
+        ref = f"[교수 피드백(gold)]\n{fb}"
+        if idx in khs_draft:
+            ref += f"\n\n[위 피드백이 가리키는 LLM 원안(gemma-3-27b)]\n{khs_draft[idx]}"
+        khs_ref[idx] = ref
+
+    references = CK.merge_references(khs_ref, sy_gold)  # KHS 피드백 우선, 없으면 SY
+    print(f"[build] gold 참고문: KHS {len(khs_ref)} + SY {len(sy_gold)} → 병합 {len(references)}건")
 
     with open(VITAL_MAP_PKL, "rb") as f:
         vital_map = pickle.load(f)

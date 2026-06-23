@@ -236,23 +236,27 @@ def load_sy(xlsx_path, sy_cols, header_rows=3):
     return gold_by_idx, scored_rows
 
 
-def load_khs(xlsx_path, sheet, hints, gold_df):
-    """KHS 엑셀의 '진짜 gold'(Feedback) 로드 → {idx: feedback_gold_text}.
-    Feedback이 빈 행은 건너뜀. sid 컬럼 있으면 sid로, 없으면 행 순서로 gold_df와 매칭.
-    추가로 {idx: llm_sample}(gemma 참고초안)도 반환(참고용)."""
+def _cell(v):
+    """엑셀 셀 → 정제 문자열('', 'nan', '-'는 빈값)."""
+    if v is None or (isinstance(v, float)):
+        return ""
+    s = str(v).strip()
+    return "" if s.lower() in ("", "nan", "-") else s
+
+
+def load_khs(xlsx_path, sheet, cols, header_rows, gold_df):
+    """KHS 엑셀(다중헤더, 위치 기반) 로드.
+    반환:
+      gold_by_idx  : {idx: 교수 피드백(c10) gold text}  — 빈 행 제외
+      draft_by_idx : {idx: gemma 원안(c9) — 피드백 '대상' 맥락용}
+    매칭: c2 sid → gold_df idx 우선, 실패 시 c0 idx, 그래도 없으면 행순서."""
+    import pandas as pd
     try:
-        import pandas as pd
-        df = pd.read_excel(xlsx_path, sheet_name=sheet)
+        raw = pd.read_excel(xlsx_path, sheet_name=sheet, header=None)
     except Exception as e:
         print(f"[checklist] KHS 로드 실패({e})")
         return {}, {}
-    cols = detect_columns(df, hints)
-    fb_col = cols.get("feedback")
-    if fb_col is None:
-        print("[checklist] KHS Feedback 컬럼 자동감지 실패 → config_v2.KHS_COL_HINTS 확인")
-        return {}, {}
-    llm_col = cols.get("llm_sample")
-    sid_col = cols.get("sid")
+    data = raw.iloc[header_rows:].reset_index(drop=True)
 
     sid_to_idx = {}
     for i in range(len(gold_df)):
@@ -263,27 +267,31 @@ def load_khs(xlsx_path, sheet, hints, gold_df):
         except Exception:
             pass
 
-    feedback, llm_sample = {}, {}
-    for r in range(len(df)):
+    gold_by_idx, draft_by_idx = {}, {}
+    for r in range(len(data)):
         idx = None
-        if sid_col is not None:
+        try:
+            idx = sid_to_idx.get(int(float(data.iloc[r, cols["sid"]])))
+        except Exception:
+            idx = None
+        if idx is None:
             try:
-                idx = sid_to_idx.get(int(df.iloc[r][sid_col]))
+                ci = int(float(data.iloc[r, cols["idx"]]))
+                idx = ci if ci < len(gold_df) else None
             except Exception:
                 idx = None
         if idx is None:
             idx = r if r < len(gold_df) else None
         if idx is None:
             continue
-        fb = df.iloc[r][fb_col]
-        if fb is not None and not (isinstance(fb, float)) and str(fb).strip() and str(fb).strip().lower() != "nan":
-            feedback[idx] = str(fb).strip()
-        if llm_col is not None:
-            ls = df.iloc[r][llm_col]
-            if ls is not None and not (isinstance(ls, float)) and str(ls).strip():
-                llm_sample[idx] = str(ls).strip()
-    print(f"[checklist] KHS 진짜 gold(Feedback) {len(feedback)}건 로드")
-    return feedback, llm_sample
+        fb = _cell(data.iloc[r, cols["feedback"]])   # c10 = gold
+        dr = _cell(data.iloc[r, cols["llm"]])         # c9  = gemma 원안
+        if fb:
+            gold_by_idx[idx] = fb
+        if dr:
+            draft_by_idx[idx] = dr
+    print(f"[checklist] KHS gold(c10 피드백) {len(gold_by_idx)}건, 원안(c9) {len(draft_by_idx)}건 로드")
+    return gold_by_idx, draft_by_idx
 
 
 def merge_references(*ref_dicts):
