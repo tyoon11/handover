@@ -76,6 +76,11 @@ KHS_HEADER_ROWS = 3
 KHS_COLS = dict(idx=0, pid=1, sid=2, dept_list=3, dept=4, recovery=5,
                 anrec=6, preop=7, premed=8, llm=9, feedback=10, newgold=11)
 
+# KHS c10 입력오류 보정: {잘못 들어간_sid: 실제_sid}.
+# Crouzon(Fronto-orbital, sid 100515294)의 c10이 옆 행(Craniotomy/DNET, sid 100556518)에
+# 잘못 입력됨 → DNET 행의 gold를 진짜 Crouzon으로 이동. (DNET은 c10 없음 → no_gold)
+KHS_GOLD_REMAP = {"100556518": "100515294"}
+
 # SY 엑셀 컬럼 위치 (header 3행, 데이터는 row3~). idx·gold는 병합셀이므로 ffill 필요.
 SY_COLS = dict(
     idx=0, dept=1, recovery=2, anrec=3, preop=4, premed=5, gold=6,

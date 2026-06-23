@@ -137,7 +137,17 @@ def evaluate_files(result_files, checklist, gold_df, vital_map, engine):
             dict(coverage=1.0, missed=[], high_missed=False)
         fa = M.parse_faithfulness(fa_res.get(i))
         br = M.parse_brevity(br_res.get(i))
-        r["scores"] = M.composite(cov, fa, br, entry, r["gen"])
+        sc = M.composite(cov, fa, br, entry, r["gen"])
+        # gold 없는 케이스(no_gold): coverage 판단 불가 → 제외(중립).
+        # composite은 faithfulness+brevity만으로 재정규화, 안전위반 없음.
+        if entry.get("source") == "no_gold":
+            fa_, br_ = sc.get("faithfulness"), sc.get("brevity")
+            wf, wb = M.V2_WEIGHTS["faithfulness"], M.V2_WEIGHTS["brevity"]
+            comp = ((wf * (0.5 if fa_ is None else fa_) + wb * (0.5 if br_ is None else br_))
+                    / (wf + wb))
+            sc.update(coverage=None, composite=round(comp, 4), safety_violation=False,
+                      note="gold 없음(no_gold) — coverage 제외, faith+brev로만 평가")
+        r["scores"] = sc
 
     # 5) 파일별 저장
     by_file = {}

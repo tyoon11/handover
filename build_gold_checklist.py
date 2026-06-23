@@ -37,7 +37,7 @@ from config import GOLD_PKL, VITAL_MAP_PKL
 from config_v2 import (
     EVAL_V2_LLM, EVAL_V2_BACKEND, EVAL_V2_GEN,
     GOLD_CHECKLIST_JSON, XLSX_COL_HINTS, SY_COLS, SY_HEADER_ROWS, gold_sy_path,
-    GOLD_KHS_XLSX, KHS_SHEET, KHS_COLS, KHS_HEADER_ROWS,
+    GOLD_KHS_XLSX, KHS_SHEET, KHS_COLS, KHS_HEADER_ROWS, KHS_GOLD_REMAP,
 )
 from pipeline.eval_v2 import checklist as CK
 
@@ -67,7 +67,8 @@ def do_build(args):
     khs_gold, khs_draft = {}, {}
     if GOLD_KHS_XLSX.exists():
         khs_gold, khs_draft = CK.load_khs(
-            GOLD_KHS_XLSX, KHS_SHEET, KHS_COLS, KHS_HEADER_ROWS, gold_df)
+            GOLD_KHS_XLSX, KHS_SHEET, KHS_COLS, KHS_HEADER_ROWS, gold_df,
+            remap=KHS_GOLD_REMAP)
     else:
         print(f"[build] ⚠ KHS 파일 없음: {GOLD_KHS_XLSX}")
     print(f"[build] 교수님 gold(c10) {len(khs_gold)}건 → 이것만 정답으로 사용")
@@ -80,6 +81,15 @@ def do_build(args):
 
     checklist = CK.build_checklist(engine, gold_df, vital_map,
                                    gold_refs=khs_gold, context_refs=khs_draft)
+
+    # 교수님 직접 검수 불가 → --accept 시 c10 기반 추출본을 정식 gold로 '채택'
+    # (gold 있는 케이스만 reviewed=true; no_gold는 그대로 둠)
+    if getattr(args, "accept", False):
+        for v in checklist.values():
+            if v.get("source") in ("gold_llm", "gold_normal"):
+                v["reviewed"] = True
+                v["review_note"] = "교수님 직접 검수 불가 — c10 기반 자동추출본을 정식 gold로 채택"
+
     CK.save_checklist(checklist, GOLD_CHECKLIST_JSON)
 
     n_items = sum(len(v["items"]) for v in checklist.values())
@@ -90,9 +100,12 @@ def do_build(args):
           f"normal {n_normal}건, gold없음(수기필요) {n_nogold}건")
     if n_nogold:
         miss = [v["sid"] for v in checklist.values() if v.get("source") == "no_gold"]
-        print(f"  ⚠ gold 없는 케이스(c10 공란) sid={miss} — 수기 작성 필요 "
-              f"(예: Crouzon 케이스는 c10이 옆 행에 잘못 입력됨)")
-    print("  ⚠ reviewed=false. 전문의 검토 후 reviewed=true로 바꾸세요.")
+        print(f"  ⚠ gold 없는 케이스(c10 공란) sid={miss} — coverage 평가 제외(중립). "
+              f"(DNET craniotomy는 c10 자체가 없음)")
+    if getattr(args, "accept", False):
+        print("  ✓ --accept: gold 보유 케이스를 reviewed=true(채택)로 확정")
+    else:
+        print("  ⚠ reviewed=false. 검수 불가 시 --accept로 재실행해 확정하세요.")
 
 
 def do_calibrate(args):
@@ -169,6 +182,8 @@ def main():
     ap.add_argument("--backend", type=str, default=EVAL_V2_BACKEND)
     ap.add_argument("--inspect", action="store_true")
     ap.add_argument("--calibrate", action="store_true")
+    ap.add_argument("--accept", action="store_true",
+                    help="교수님 검수 불가 시: c10 기반 추출본을 정식 gold로 채택(reviewed=true)")
     args = ap.parse_args()
 
     if args.inspect:

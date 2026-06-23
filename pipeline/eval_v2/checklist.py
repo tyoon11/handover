@@ -255,12 +255,14 @@ def _cell(v):
     return "" if s.lower() in ("", "nan", "-") else s
 
 
-def load_khs(xlsx_path, sheet, cols, header_rows, gold_df):
+def load_khs(xlsx_path, sheet, cols, header_rows, gold_df, remap=None):
     """KHS 엑셀(다중헤더, 위치 기반) 로드.
     반환:
       gold_by_idx  : {idx: 교수 피드백(c10) gold text}  — 빈 행 제외
       draft_by_idx : {idx: gemma 원안(c9) — 피드백 '대상' 맥락용}
-    매칭: c2 sid → gold_df idx 우선, 실패 시 c0 idx, 그래도 없으면 행순서."""
+    매칭: c2 sid → gold_df idx 우선, 실패 시 c0 idx, 그래도 없으면 행순서.
+    remap: {잘못된_sid(str): 실제_sid(str)} — c10 입력오류 보정(해당 행 gold를 실제 sid로 이동)."""
+    remap = remap or {}
     import pandas as pd
     try:
         raw = pd.read_excel(xlsx_path, sheet_name=sheet, header=None)
@@ -279,29 +281,36 @@ def load_khs(xlsx_path, sheet, cols, header_rows, gold_df):
             pass
 
     gold_by_idx, draft_by_idx = {}, {}
+    n_remap = 0
     for r in range(len(data)):
-        idx = None
+        row_sid = None
         try:
-            idx = sid_to_idx.get(int(float(data.iloc[r, cols["sid"]])))
+            row_sid = int(float(data.iloc[r, cols["sid"]]))
         except Exception:
-            idx = None
-        if idx is None:
+            row_sid = None
+        # gold(c10)는 remap 적용한 sid로, draft(c9)는 원래 sid로 귀속
+        gold_sid = int(remap[str(row_sid)]) if str(row_sid) in remap else row_sid
+        if str(row_sid) in remap:
+            n_remap += 1
+        gold_idx = sid_to_idx.get(gold_sid)
+        draft_idx = sid_to_idx.get(row_sid)
+        if gold_idx is None and draft_idx is None:
+            # sid 매칭 실패 → c0 idx / 행순서 fallback
             try:
                 ci = int(float(data.iloc[r, cols["idx"]]))
-                idx = ci if ci < len(gold_df) else None
+                gold_idx = draft_idx = ci if ci < len(gold_df) else None
             except Exception:
-                idx = None
-        if idx is None:
-            idx = r if r < len(gold_df) else None
-        if idx is None:
-            continue
+                gold_idx = draft_idx = (r if r < len(gold_df) else None)
         fb = _cell(data.iloc[r, cols["feedback"]])   # c10 = gold
         dr = _cell(data.iloc[r, cols["llm"]])         # c9  = gemma 원안
-        if fb:
-            gold_by_idx[idx] = fb
-        if dr:
-            draft_by_idx[idx] = dr
-    print(f"[checklist] KHS gold(c10 피드백) {len(gold_by_idx)}건, 원안(c9) {len(draft_by_idx)}건 로드")
+        if fb and gold_idx is not None:
+            gold_by_idx[gold_idx] = fb
+        if dr and draft_idx is not None:
+            draft_by_idx[draft_idx] = dr
+    msg = f"[checklist] KHS gold(c10) {len(gold_by_idx)}건, 원안(c9) {len(draft_by_idx)}건 로드"
+    if n_remap:
+        msg += f" (입력오류 remap {n_remap}건 적용)"
+    print(msg)
     return gold_by_idx, draft_by_idx
 
 
