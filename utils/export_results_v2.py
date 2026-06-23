@@ -135,9 +135,22 @@ def main():
                  f"<span class='meta'>(sid {sid}, 필수항목 {entry.get('items', []) and len(entry['items']) or 0}개"
                  f"{', NORMAL' if entry.get('is_normal_case') else ''})</span></h2>")
 
-        # gold checklist 표시
+        # ── Gold 인계지 (정답) — 크게 표시 ──
+        gold_note = entry.get("gold_note")
+        if gold_note is None:  # 아직 합성 안 됨 → 항목 조인 fallback
+            from pipeline.eval_v2.checklist import gold_note_from_items
+            gold_note = gold_note_from_items(entry)
+        if entry.get("source") == "no_gold":
+            gold_html = "<span class='meta'>(교수님 gold 없음 — coverage 평가 제외)</span>"
+        else:
+            gold_html = esc(gold_note) or "<span class='meta'>(없음)</span>"
+        H.append("<div style='background:#ecfdf5;border-left:4px solid #10b981;"
+                 "padding:10px 14px;margin:10px 0;border-radius:4px'>"
+                 f"<b>📋 Gold 인계지 (정답)</b><br><span style='font-size:15px'>{gold_html}</span></div>")
+
+        # gold checklist(항목) — 접어서 보조 표시
         if entry.get("items"):
-            H.append("<details><summary>Gold 필수 인계 항목</summary><pre>")
+            H.append("<details><summary>Gold 필수 인계 항목 (채점 기준)</summary><pre>")
             for it in entry["items"]:
                 H.append(f"- [{esc(it.get('severity'))}] {esc(it.get('finding'))} "
                          f"<span class='meta'>({esc(it.get('category'))})</span>")

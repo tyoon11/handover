@@ -184,14 +184,31 @@ def main():
     ap.add_argument("--calibrate", action="store_true")
     ap.add_argument("--accept", action="store_true",
                     help="교수님 검수 불가 시: c10 기반 추출본을 정식 gold로 채택(reviewed=true)")
+    ap.add_argument("--gold_note", action="store_true",
+                    help="기존 checklist에 gold_note(실제 인계지) 추가 (재추출 안 함, 기존 필드 보존)")
     args = ap.parse_args()
 
     if args.inspect:
         do_inspect()
     elif args.calibrate:
         do_calibrate(args)
+    elif args.gold_note:
+        do_gold_note(args)
     else:
         do_build(args)
+
+
+def do_gold_note(args):
+    """기존 gold_checklist_v2.json을 보존한 채 gold_note만 LLM으로 합성해 덧붙인다."""
+    checklist = CK.load_checklist(GOLD_CHECKLIST_JSON)
+    if not checklist:
+        print("[gold_note] checklist 없음 — 먼저 빌드하세요."); return
+    from pipeline.eval_v2.engine import EvalEngine
+    engine = EvalEngine(EVAL_V2_LLM, backend=args.backend, gen_cfg=EVAL_V2_GEN)
+    checklist = CK.compose_gold_notes(engine, checklist)
+    CK.save_checklist(checklist, GOLD_CHECKLIST_JSON)
+    n = sum(1 for v in checklist.values() if v.get("gold_note"))
+    print(f"[gold_note] gold_note {n}건 추가 → {GOLD_CHECKLIST_JSON}")
 
 
 if __name__ == "__main__":

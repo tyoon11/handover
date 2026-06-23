@@ -189,6 +189,66 @@ def build_checklist(engine, gold_df, vital_map, gold_refs, context_refs=None):
     return checklist
 
 
+_SEV_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+
+def gold_note_from_items(entry):
+    """항목 → '실제 인계지' 텍스트(템플릿, LLM 없이). severity 높은 순으로 문장 나열.
+    normal → '특이사항 없음', no_gold → '' (gold 없음)."""
+    if entry.get("source") == "no_gold":
+        return ""
+    if entry.get("is_normal_case"):
+        return "특이사항 없음"
+    items = sorted(entry.get("items", []),
+                   key=lambda it: _SEV_ORDER.get(it.get("severity"), 1))
+    sents = []
+    for it in items:
+        f = (it.get("finding") or "").strip().rstrip(".。").strip()
+        if f:
+            sents.append(f + ".")
+    return " ".join(sents)
+
+
+_NOTE_SYSTEM = (
+    "You write one ultra-brief PACU/ICU handoff note from the given key points, in the exact "
+    "target style: exception-based, 1-5 short formal Korean sentences, keep medical terms/drug/"
+    "procedure names in English, no administrative phrases, no recommendations, no repetition. "
+    "Convey ALL given key points and nothing else."
+)
+
+_NOTE_TMPL = """다음 '필수 인계 항목'을 PACU/ICU 인계지 한 편으로 작성하세요.
+- 1~5개의 짧은 격식 한국어 문장. 의학용어/약물/술기명은 영어 유지.
+- 모든 항목을 빠짐없이 담되, 그 외 군더더기(행정·추론성 권고·반복) 금지.
+- 텍스트만 출력(따옴표/머리말 없이).
+
+### 필수 인계 항목
+{items}
+
+### 인계지
+"""
+
+
+def compose_gold_notes(engine, checklist):
+    """기존 checklist에 gold_note(실제 인계지) 추가. 기존 필드는 보존.
+    normal/no_gold는 LLM 없이 채우고, 항목 있는 케이스만 LLM 합성."""
+    keys, prompts = [], []
+    for k, v in checklist.items():
+        if v.get("source") == "no_gold":
+            v["gold_note"] = ""
+        elif v.get("is_normal_case"):
+            v["gold_note"] = "특이사항 없음"
+        else:
+            lines = [f'- [{it.get("severity")}] {it.get("finding")}' for it in v.get("items", [])]
+            keys.append(k)
+            prompts.append(_NOTE_TMPL.format(items="\n".join(lines)))
+    if prompts:
+        outs = engine.chat(prompts, system=_NOTE_SYSTEM)
+        for k, t in zip(keys, outs):
+            note = (t or "").strip()
+            checklist[k]["gold_note"] = note if note else gold_note_from_items(checklist[k])
+    return checklist
+
+
 def load_sy(xlsx_path, sy_cols, header_rows=3):
     """인계요약지_SY.xlsx 전용 로더 (위치 기반, 병합셀 ffill).
 
