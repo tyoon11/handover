@@ -73,28 +73,52 @@ _RE_THINK_OPEN = re.compile(r"<think>.*$", re.DOTALL | re.IGNORECASE)
 _RE_CODE_FENCE = re.compile(r"```.*?```", re.DOTALL)
 _RE_ROLE = re.compile(r"^\s*(?:assistant|user|system)\s*:?\s*$", re.MULTILINE | re.IGNORECASE)
 
+# 생성 붕괴 신호
+_RE_CHAR_WALL = re.compile(r"(.)\1{7,}")                 # 같은 글자/기호 8+ 연속 (ልልል, //////, ....)
+_RE_THOUGHT_LEAK = re.compile(r"(?://|_|\|)\s*thought\b|<\|?thought", re.IGNORECASE)  # //thought, _thought 누출
+
 
 def detect_repetition(text: str, n: int = 4, thresh: float = 0.5) -> bool:
-    """n-gram 반복 비율이 높으면 degenerate(반복 루프)로 판정."""
+    """반복 루프 판정: (1) 같은 단어 3회 연속, (2) n-gram 다양성 낮음."""
     toks = text.split()
+    # (1) 동일 단어 3회 연속 (짧은 출력도 잡음: "single single single")
+    for i in range(len(toks) - 2):
+        if toks[i] and toks[i] == toks[i + 1] == toks[i + 2]:
+            return True
+    # (2) n-gram 다양성
     if len(toks) < n * 3:
         return False
     grams = [tuple(toks[i:i + n]) for i in range(len(toks) - n + 1)]
-    if not grams:
-        return False
     uniq = len(set(grams)) / len(grams)
     return uniq < thresh
 
 
+def _foreign_script_ratio(text: str) -> float:
+    """한글·영문·숫자·일반 문장부호가 아닌 '엉뚱한 스크립트'(암하라어·태국어 등) 비율.
+    공백 제외 문자 기준. 높으면 garbage."""
+    allowed_punct = set(" \n\t().,/%+-:;#*°<>=~?!'\"[]{}·…&|\\@^_$°²³㎎㎍㏖①②③·…")
+    total = other = 0
+    for c in text:
+        if c.isspace():
+            continue
+        total += 1
+        o = ord(c)
+        is_hangul = 0xAC00 <= o <= 0xD7A3 or 0x1100 <= o <= 0x11FF
+        is_ascii = c.isascii() and (c.isalnum() or c in allowed_punct)
+        is_cjk = 0x4E00 <= o <= 0x9FFF          # 한자(가끔 등장) — 허용
+        if not (is_hangul or is_ascii or is_cjk or c in allowed_punct):
+            other += 1
+    return (other / total) if total else 0.0
+
+
 def clean_v2(raw: str):
     """v2 정제. 반환: (cleaned_text, status)
-       status ∈ {"ok", "empty", "repetition", "truncated"}
+       status ∈ {"ok","empty","repetition","garbage","leak","truncated"}
        - 실패여도 텍스트를 임의 문구로 치환하지 않는다(점수 단계에서 status로 분기)."""
     if raw is None:
         return "", "empty"
     text = raw
     text = _RE_THINK_CLOSED.sub("", text)
-    # 안 닫힌 think: 닫힘이 없으면 think 이후를 trailing으로 간주해 제거
     if "<think>" in text and "</think>" not in text:
         text = _RE_THINK_OPEN.sub("", text)
     text = _RE_ROLE.sub("", text)
@@ -102,7 +126,13 @@ def clean_v2(raw: str):
 
     if len(cleaned) < 3:
         return cleaned, "empty"
-    if detect_repetition(cleaned):
+    if _RE_CHAR_WALL.search(cleaned):            # ልልል, //////, .... 같은 문자 벽
+        return cleaned, "repetition"
+    if _foreign_script_ratio(cleaned) > 0.15:    # 암하라어 등 엉뚱한 문자 다수
+        return cleaned, "garbage"
+    if _RE_THOUGHT_LEAK.search(cleaned):         # //thought, _thought 누출 = 생성 붕괴
+        return cleaned, "leak"
+    if detect_repetition(cleaned):               # 단어 n-gram 반복 루프
         return cleaned, "repetition"
     # 잘림 휴리스틱: 종결부호/한글 종결 없이 조사로 끝나면 truncated 의심
     if re.search(r"(를|을|이|가|에|의|로|와|과)\s*$", cleaned) and not cleaned.endswith(("다", "요", ".", "음", "함")):
