@@ -120,12 +120,11 @@ def main():
         for r in recs:
             cases.setdefault(r.get("idx", 0), []).append((tag, r))
 
-    # 케이스별 집계 (평균 composite, 안전위반 수)
+    # 케이스별 집계 (평균 composite)
     def case_stats(idx):
         rs = [r for _, r in cases[idx]]
         cs = [r.get("composite", 0) or 0 for r in rs]
-        viol = sum(1 for r in rs if r.get("safety_violation"))
-        return (sum(cs) / len(cs) if cs else 0, viol, len(rs))
+        return (sum(cs) / len(cs) if cs else 0, len(rs))
     ordered = sorted(cases.keys(), key=lambda i: case_stats(i)[0])  # 문제 많은 케이스 위로
 
     from pipeline.eval_v2.checklist import gold_note_from_items
@@ -145,27 +144,25 @@ def main():
     H.append("""<div class='guide'><h3>📐 점수 읽는 법</h3>
 <p class='meta'>세 축 모두 0~1, <b>높을수록 좋음</b>. 합산(sum)으로 뭉치지 않고 따로 봅니다.</p>
 <table>
-<tr><td>COVERAGE</td><td>Gold 필수 항목 중 모델이 <b>담은 비율</b>(severity 가중). <b>안전 핵심</b> — 놓치면 위험.</td></tr>
+<tr><td>COVERAGE</td><td>Gold 필수 항목 중 모델이 <b>담은 비율</b>(단순 recall). <b>가장 중요한 축</b> — 놓치면 낮음.</td></tr>
 <tr><td>FAITHFULNESS</td><td>출력 문장이 EMR <b>사실과 일치</b>하는 비율. 창작/모순(환각)이 많으면 낮음.</td></tr>
 <tr><td>BREVITY</td><td>불필요한 설명·추론성 권고('~하니 ~해라')·행정 문구(약 잔량/이송) 같은 <b>노이즈가 없는</b> 정도.</td></tr>
-<tr><td>COMPOSITE</td><td>0.5·COV + 0.3·FAITH + 0.2·BREV. <b>단, 안전위반이면 0.15로 절단.</b></td></tr>
-<tr><td><span class='b-viol badge'>안전위반</span></td><td>이상소견이 있는데 '특이사항 없음'으로 응답했거나 <b>고위험(high) 항목을 통째로 누락</b> → 임상적으로 위험.</td></tr>
+<tr><td>COMPOSITE</td><td>0.5·COV + 0.3·FAITH + 0.2·BREV. coverage 비중이 가장 커서 항목을 놓치면 자연히 낮아짐.</td></tr>
 </table>
-<p class='meta'>표에서 <span class='best badge' style='background:#dcfce7;color:#166534'>초록</span>=그 케이스 최고 composite, <span class='b-viol badge'>빨강 행</span>=안전위반. 'NORMAL' 케이스는 정답이 '특이사항 없음'이라 그렇게 답하면 만점.</p>
+<p class='meta'>표에서 <span class='best badge' style='background:#dcfce7;color:#166534'>초록</span>=그 케이스 최고 composite. 'NORMAL' 케이스는 정답이 '특이사항 없음'이라 그렇게 답하면 만점. (안전위반 같은 임의 게이트는 사용하지 않음 — coverage 점수로 직접 판단)</p>
 </div>""")
 
     # ── 목차 ──
     H.append("<h2 style='background:none;border:0;padding:0'>케이스 목차</h2><ul class='toc'>")
     for idx in ordered:
-        avg, viol, n = case_stats(idx)
+        avg, n = case_stats(idx)
         sid = cases[idx][0][1].get("sid", -1)
         entry = checklist.get(str(sid), {})
         op = entry.get("opname", "-")
         tag = " · NORMAL" if entry.get("is_normal_case") else (
             " · gold없음" if entry.get("source") == "no_gold" else "")
-        vtxt = f" <span class='v'>위반 {viol}/{n}</span>" if viol else ""
         H.append(f"<li><a href='#case-{idx}'>Case {idx} — {esc(op)}</a> "
-                 f"<span class='meta'>(avg {avg:.2f}{tag})</span>{vtxt}</li>")
+                 f"<span class='meta'>(avg {avg:.2f}{tag})</span></li>")
     H.append("</ul>")
 
     for idx in ordered:
@@ -173,13 +170,13 @@ def main():
         sid = rows[0][1].get("sid", -1)
         entry = checklist.get(str(sid), {})
         opname = entry.get("opname", "-")
-        avg, viol, n = case_stats(idx)
+        avg, n = case_stats(idx)
         nitems = len(entry.get("items", []))
         flag = " · NORMAL(정답=특이사항 없음)" if entry.get("is_normal_case") else (
             " · gold없음" if entry.get("source") == "no_gold" else "")
         H.append(f"<h2 id='case-{idx}'>Case {idx} — {esc(opname)}</h2>")
         H.append(f"<div class='casebar'>sid {sid} · 필수항목 {nitems}개{flag} · "
-                 f"평균 composite {avg:.2f} · 안전위반 {viol}/{n}</div>")
+                 f"평균 composite {avg:.2f} · 모델 {n}개</div>")
 
         # ── 입력 (EMR + Vital) — v1처럼 ──
         try:
@@ -210,26 +207,21 @@ def main():
                          f"<span class='meta'>({esc(it.get('category'))})</span>")
             H.append("</pre></details>")
 
-        # 점수표 (composite 내림차순, 안전위반은 하단/강조)
-        rows_sorted = sorted(rows, key=lambda tr: (
-            tr[1].get("safety_violation", False), -(tr[1].get("composite") or 0)))
+        # 점수표 (composite 내림차순)
+        rows_sorted = sorted(rows, key=lambda tr: -(tr[1].get("composite") or 0))
         H.append("<table><thead><tr><th>모델</th><th>학습</th><th>COVERAGE</th>"
-                 "<th>FAITH</th><th>BREVITY</th><th>COMPOSITE</th><th>안전</th>"
+                 "<th>FAITH</th><th>BREVITY</th><th>COMPOSITE</th>"
                  "<th>누락</th><th>환각</th><th>상태</th></tr></thead><tbody>")
-        _safe_comps = [(r.get("composite") or 0) for _, r in rows
-                       if not r.get("safety_violation")]
-        best_comp = max(_safe_comps) if _safe_comps else None
+        _comps = [(r.get("composite") or 0) for _, r in rows]
+        best_comp = max(_comps) if _comps else None
         for tag, r in rows_sorted:
             model, exp = split_tag(tag)
-            viol = r.get("safety_violation", False)
-            cls = " class='viol'" if viol else (
-                " class='best'" if (best_comp is not None and r.get("composite") == best_comp) else "")
-            badge = "<span class='b-viol badge'>위반</span>" if viol else "<span class='b-ok badge'>ok</span>"
+            cls = " class='best'" if (best_comp is not None and r.get("composite") == best_comp) else ""
             H.append(
                 f"<tr{cls}><td>{esc(model)}</td><td>{esc(exp)}</td>"
                 f"<td>{fmt(r.get('coverage'))}</td><td>{fmt(r.get('faithfulness'))}</td>"
                 f"<td>{fmt(r.get('brevity_v2'))}</td><td><b>{fmt(r.get('composite'))}</b></td>"
-                f"<td>{badge}</td><td>{len(r.get('missed_items', []))}</td>"
+                f"<td>{len(r.get('missed_items', []))}</td>"
                 f"<td>{len(r.get('hallucinations', []))}</td>"
                 f"<td class='meta'>{esc(r.get('gen_status', 'ok'))}</td></tr>")
         H.append("</tbody></table>")
@@ -238,8 +230,7 @@ def main():
         H.append("<details><summary>모델 출력 + 누락/환각 상세 (클릭)</summary>")
         for tag, r in rows_sorted:
             model, exp = split_tag(tag)
-            H.append(f"<h4>{esc(model)} · {esc(exp)} — composite={fmt(r.get('composite'))}"
-                     f"{'  ⚠안전위반' if r.get('safety_violation') else ''}</h4>")
+            H.append(f"<h4>{esc(model)} · {esc(exp)} — composite={fmt(r.get('composite'))}</h4>")
             H.append(f"<pre>{esc(r.get('generated_v2') or r.get('generated', ''))}</pre>")
             miss = r.get("missed_items", [])
             halu = r.get("hallucinations", [])

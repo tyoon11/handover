@@ -62,10 +62,10 @@ def build_coverage_prompt(output, entry):
 
 
 def parse_coverage(pj, entry):
-    """LLM verdict → coverage 점수 + 누락항목 + 안전위반 플래그.
-    severity 가중 recall: covered/total (yes=1, partial=0.5)."""
+    """LLM verdict → coverage 점수 + 누락항목.
+    단순 recall: covered/total (yes=1, partial=0.5). severity 가중 없음
+    (severity는 LLM 추정값이라 채점에 쓰지 않음 — 표시용 메타로만 유지)."""
     items = entry.get("items", [])
-    by_id = {it["id"]: it for it in items}
     verdicts = {}
     if isinstance(pj, dict):
         for v in pj.get("verdicts", []) or []:
@@ -75,20 +75,17 @@ def parse_coverage(pj, entry):
     num = den = 0.0
     missed = []
     for it in items:
-        w = _SEV_W.get(it.get("severity", "medium"), 2.0)
-        den += w
+        den += 1.0
         st = verdicts.get(it["id"], "no")
         if st == "yes":
-            num += w
+            num += 1.0
         elif st == "partial":
-            num += 0.5 * w
+            num += 0.5
             missed.append({**it, "status": "partial"})
         else:
             missed.append({**it, "status": "no"})
     coverage = (num / den) if den > 0 else 1.0
-    # 고위험 항목을 완전히 놓쳤는지 = 안전 위반
-    high_missed = any(m.get("severity") == "high" and m.get("status") == "no" for m in missed)
-    return dict(coverage=round(coverage, 4), missed=missed, high_missed=high_missed)
+    return dict(coverage=round(coverage, 4), missed=missed)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -182,35 +179,28 @@ def degenerate_scores(status):
     """clean_v2 status가 ok가 아닐 때(빈/반복/잘림) LLM 없이 즉시 0점."""
     return dict(
         coverage=0.0, faithfulness=0.0, brevity=0.0,
-        composite=0.0, safety_violation=True,
+        composite=0.0,
         missed=[], hallucinations=[], noise=[],
         gen_status=status,
-        note=f"생성 실패({status}) — 평가 제외, 0점",
+        note=f"생성 실패({status}) — 0점",
     )
 
 
 def normal_case_no_llm(output):
-    """is_normal_case(정답='특이사항 없음')에서 출력이 no-issue면 즉시 만점 처리.
-    (LLM 호출 절약 + 안정 케이스의 올바른 '특이사항 없음'을 보상)"""
+    """is_normal_case(정답='특이사항 없음')에서 출력이 no-issue면 즉시 만점 처리."""
     if is_no_issue(output):
         return dict(coverage=1.0, faithfulness=1.0, brevity=1.0, composite=1.0,
-                    safety_violation=False, missed=[], hallucinations=[], noise=[],
+                    missed=[], hallucinations=[], noise=[],
                     gen_status="ok", note="normal-case + 올바른 '특이사항 없음'")
-    return None  # normal인데 뭔가 보고함 → faithfulness/brevity로 정상 채점(false alarm)
+    return None  # normal인데 뭔가 보고함 → faithfulness/brevity로 정상 채점
 
 
 def composite(cov, faith, brev, entry, output):
-    """3축 → composite. 안전 하드게이트 적용.
-
-    safety_violation = 이상소견 케이스(items>0)인데 모델이 '특이사항 없음'류이거나
-                       고위험 항목을 통째로 놓침 → composite 상한 절단."""
-    items = entry.get("items", [])
-    abnormal = len(items) > 0 and not entry.get("is_normal_case", False)
-
+    """3축 → composite = 0.5·COV + 0.3·FAITH + 0.2·BREV (게이트 없음).
+    coverage가 가장 큰 가중치라, 이상소견을 놓치면(coverage↓) composite도 낮아진다."""
     cv = cov.get("coverage")
     fa = faith.get("faithfulness")
     br = brev.get("brevity")
-    # None(평가불가)은 중립 0.5로 대체하되 별도 기록
     cv_ = 0.0 if cv is None else cv
     fa_ = 0.5 if fa is None else fa
     br_ = 0.5 if br is None else br
@@ -218,26 +208,13 @@ def composite(cov, faith, brev, entry, output):
     w = V2_WEIGHTS
     comp = w["coverage"] * cv_ + w["faithfulness"] * fa_ + w["brevity"] * br_
 
-    safety = False
-    note = ""
-    if abnormal and is_no_issue(output):
-        safety = True
-        note = "안전위반: 이상소견 있는데 '특이사항 없음'으로 응답(놓침)"
-    elif abnormal and cov.get("high_missed"):
-        safety = True
-        note = "안전위반: 고위험 항목 누락"
-
-    if safety:
-        comp = min(comp, V2_SAFETY_VIOLATION_CAP)
-
     return dict(
         coverage=cv, faithfulness=fa, brevity=br,
         composite=round(comp, 4),
-        safety_violation=safety,
         missed=cov.get("missed", []),
         hallucinations=faith.get("hallucinations", []),
         noise=brev.get("noise", []),
         n_claims=faith.get("n_claims", 0),
         gen_status="ok",
-        note=note,
+        note="",
     )

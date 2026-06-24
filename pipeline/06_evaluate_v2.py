@@ -75,15 +75,14 @@ def evaluate_files(result_files, checklist, gold_df, vital_map, engine):
             elif entry.get("is_normal_case") and is_no_issue(gen):
                 rinfo["fast"] = M.normal_case_no_llm(gen)
             elif (len(entry.get("items", [])) > 0 and not entry.get("is_normal_case")) and is_no_issue(gen):
-                # 이상소견 케이스인데 '특이사항 없음' → 안전위반, LLM 불필요
+                # 이상소견 케이스인데 '특이사항 없음' → coverage 0 (LLM 불필요)
+                w = M.V2_WEIGHTS
                 rinfo["fast"] = dict(
                     coverage=0.0, faithfulness=1.0, brevity=1.0,
-                    composite=min(M.V2_WEIGHTS["faithfulness"] + M.V2_WEIGHTS["brevity"],
-                                  M.V2_SAFETY_VIOLATION_CAP),
-                    safety_violation=True,
+                    composite=round(w["faithfulness"] + w["brevity"], 4),
                     missed=entry.get("items", []), hallucinations=[], noise=[],
                     n_claims=0, gen_status="ok",
-                    note="안전위반: 이상소견 있는데 '특이사항 없음'(놓침)")
+                    note="이상소견 있는데 '특이사항 없음' → coverage 0(전부 누락)")
             else:
                 # LLM 채점 필요
                 rinfo["need_faith"] = True
@@ -134,18 +133,18 @@ def evaluate_files(result_files, checklist, gold_df, vital_map, engine):
             continue
         entry = r["entry"]
         cov = M.parse_coverage(cov_res.get(i), entry) if r["need_cov"] else \
-            dict(coverage=1.0, missed=[], high_missed=False)
+            dict(coverage=1.0, missed=[])
         fa = M.parse_faithfulness(fa_res.get(i))
         br = M.parse_brevity(br_res.get(i))
         sc = M.composite(cov, fa, br, entry, r["gen"])
         # gold 없는 케이스(no_gold): coverage 판단 불가 → 제외(중립).
-        # composite은 faithfulness+brevity만으로 재정규화, 안전위반 없음.
+        # composite은 faithfulness+brevity만으로 재정규화.
         if entry.get("source") == "no_gold":
             fa_, br_ = sc.get("faithfulness"), sc.get("brevity")
             wf, wb = M.V2_WEIGHTS["faithfulness"], M.V2_WEIGHTS["brevity"]
             comp = ((wf * (0.5 if fa_ is None else fa_) + wb * (0.5 if br_ is None else br_))
                     / (wf + wb))
-            sc.update(coverage=None, composite=round(comp, 4), safety_violation=False,
+            sc.update(coverage=None, composite=round(comp, 4),
                       note="gold 없음(no_gold) — coverage 제외, faith+brev로만 평가")
         r["scores"] = sc
 
@@ -160,7 +159,7 @@ def evaluate_files(result_files, checklist, gold_df, vital_map, engine):
         out_dir = EVAL_V2_OUT / tag
         out_dir.mkdir(parents=True, exist_ok=True)
         out_file = out_dir / rf.name.replace(".jsonl", "_scores_v2.jsonl")
-        covs, fas, brs, comps, viol = [], [], [], [], 0
+        covs, fas, brs, comps = [], [], [], []
         with open(out_file, "w", encoding="utf-8") as f:
             for r in sorted(rs, key=lambda x: x["idx"]):
                 sc = r["scores"]
@@ -172,7 +171,6 @@ def evaluate_files(result_files, checklist, gold_df, vital_map, engine):
                     "faithfulness": sc.get("faithfulness"),
                     "brevity_v2": sc.get("brevity"),
                     "composite": sc.get("composite"),
-                    "safety_violation": sc.get("safety_violation", False),
                     "missed_items": sc.get("missed", []),
                     "hallucinations": sc.get("hallucinations", []),
                     "noise": sc.get("noise", []),
@@ -185,12 +183,11 @@ def evaluate_files(result_files, checklist, gold_df, vital_map, engine):
                 if sc.get("faithfulness") is not None: fas.append(sc["faithfulness"])
                 if sc.get("brevity") is not None: brs.append(sc["brevity"])
                 comps.append(sc.get("composite", 0.0))
-                viol += int(sc.get("safety_violation", False))
 
         def _m(x): return (sum(x) / len(x)) if x else float("nan")
         print(f"\n[{tag}] n={len(rs)}  "
               f"COV={_m(covs):.3f}  FAITH={_m(fas):.3f}  BREV={_m(brs):.3f}  "
-              f"COMPOSITE={_m(comps):.3f}  안전위반={viol}건")
+              f"COMPOSITE={_m(comps):.3f}")
         print(f"  저장: {out_file}")
 
 
