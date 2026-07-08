@@ -77,9 +77,19 @@ KHS_COLS = dict(idx=0, pid=1, sid=2, dept_list=3, dept=4, recovery=5,
                 anrec=6, preop=7, premed=8, llm=9, feedback=10, newgold=11)
 
 # KHS c10 입력오류 보정: {잘못 들어간_sid: 실제_sid}.
-# Crouzon(Fronto-orbital, sid 100515294)의 c10이 옆 행(Craniotomy/DNET, sid 100556518)에
-# 잘못 입력됨 → DNET 행의 gold를 진짜 Crouzon으로 이동. (DNET은 c10 없음 → no_gold)
-KHS_GOLD_REMAP = {"100556518": "100515294"}
+# 한 케이스의 c10 gold가 옆 행에 잘못 입력돼 있어 실제 케이스로 재귀속한다.
+# 실제 매핑값은 내부 수술ID(PHI)이므로 repo에 두지 않고 데이터 폴더 JSON에서 로드:
+#   {DATA_DIR}/preprocessed/khs_gold_remap.json   예: {"<잘못된_sid>": "<실제_sid>"}
+import json as _json
+
+_KHS_REMAP_FILE = DATA_DIR / "preprocessed" / "khs_gold_remap.json"
+try:
+    KHS_GOLD_REMAP = {
+        str(k): str(v)
+        for k, v in _json.loads(_KHS_REMAP_FILE.read_text(encoding="utf-8")).items()
+    }
+except Exception:
+    KHS_GOLD_REMAP = {}
 
 # SY 엑셀 컬럼 위치 (header 3행, 데이터는 row3~). idx·gold는 병합셀이므로 ffill 필요.
 SY_COLS = dict(

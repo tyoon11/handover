@@ -100,8 +100,7 @@ def do_build(args):
           f"normal {n_normal}건, gold없음(수기필요) {n_nogold}건")
     if n_nogold:
         miss = [v["sid"] for v in checklist.values() if v.get("source") == "no_gold"]
-        print(f"  ⚠ gold 없는 케이스(c10 공란) sid={miss} — coverage 평가 제외(중립). "
-              f"(DNET craniotomy는 c10 자체가 없음)")
+        print(f"  ⚠ gold 없는 케이스(c10 공란) {len(miss)}건 — coverage 평가 제외(중립).")
     if getattr(args, "accept", False):
         print("  ✓ --accept: gold 보유 케이스를 reviewed=true(채택)로 확정")
     else:

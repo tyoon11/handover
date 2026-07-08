@@ -57,8 +57,8 @@ v1은 원본 노트북을 충실히 이식했고, 그래서 원본의 **설계 �
 - **추출 원칙(중요)**: checklist 항목 집합 = *교수님 gold가 담은 것만*. EMR은 약어 풀이/근거
   인용에만 쓰고, **gold에 없는 소견(특히 QTc 연장·일시적 desat·혈압/심박 이벤트 카운트 등
   vital 파생)은 추가 금지**. (1차 부트스트랩이 QTc를 13/22 케이스에 과다 포함시킨 문제를 교정.)
-- gold가 '특이사항 없음'이면 `is_normal_case=true`. c10이 공란인 케이스(예: Crouzon —
-  c10이 옆 행에 잘못 입력됨)는 `source:"no_gold"`로 표시하고 **수기 작성 대상**으로 남김.
+- gold가 '특이사항 없음'이면 `is_normal_case=true`. c10이 공란인 케이스(옆 행에 잘못
+  입력된 사례 존재 — remap JSON으로 보정)는 `source:"no_gold"`로 표시하고 **수기 작성 대상**으로 남김.
 - (참고) `인계요약지_SY.xlsx`는 gold로 안 쓰고, 전문의 평가점수 168행만 `--calibrate` 검증에 사용.
 - 각 항목: `{id, finding, category, severity, source}` + 케이스 `is_normal_case`.
 - **전문의가 직접 수정 가능한 JSON.** 검수 후 `reviewed: true`로 바꾸면 정식 기준이 된다.

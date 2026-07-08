@@ -1,0 +1,15 @@
+# v3 파이프라인 의존성 — 폐쇄망 미러 기준으로 설치.
+# 아래 버전은 '테스트된 하한' 개념 — 서버에 이미 깔린 상위 버전이 있으면 그대로 사용.
+torch>=2.1
+transformers>=4.44
+trl>=0.9
+peft>=0.11
+datasets>=2.19
+accelerate>=0.30
+vllm>=0.5           # 없으면 HF fallback으로 동작하나 최종 비교는 vLLM 권장
+pandas>=2.0
+numpy>=1.24
+scipy>=1.10
+openpyxl>=3.1       # 인계요약지 xlsx 로드
+tqdm>=4.65
+huggingface_hub>=0.23   # utils/download_models.py (폐쇄망에선 미사용 가능)

@@ -24,10 +24,19 @@ models/
 checkpoints/
 
 # ── 생성된 검토 산출물 (환자 EMR/vital 원문 포함) ─────────────────
-results_cases.html
-results_cases.md
+# 패턴 기반: 버전 붙은 변형(_v2 등)이 정확명 규칙을 빠져나가는 사고 방지
+*.html
+results*.md
 results_notion.md
 results.csv
+*.jsonl
+*.log
+gold_checklist*.json
+calibration*.csv
+khs_dump*
+data/
+report_v2/
+logs_*/
 
 # ── 인계용 패키지 (EDA 노트북에 실제 수술ID 포함 — PHI) ───────────
 HANDOVER_인계용_다린/

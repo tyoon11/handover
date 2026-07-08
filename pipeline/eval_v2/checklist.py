@@ -8,11 +8,11 @@ gemma-4-31B가 구조화 추출 → 전문의가 직접 수정 가능한 JSON으
 checklist JSON 구조 (case_key = str(sid)):
 {
   "<sid>": {
-    "idx": 0, "sid": 100517749, "opname": "Repair of hypospadias",
+    "idx": 0, "sid": 12345678, "opname": "<수술명>",
     "is_normal_case": false,            # true면 정답이 "특이사항 없음"
     "items": [
-       {"id":"c1","finding":"QTc 연장(최대 495ms)","category":"hemodynamics",
-        "severity":"high","source":"QTc 연장(132회>450ms, 최대 495ms)"} ...
+       {"id":"c1","finding":"<핵심 이상소견>","category":"hemodynamics",
+        "severity":"high","source":"<EMR 근거 원문 인용>"} ...
     ],
     "source": "llm_bootstrap",          # or "xlsx_human" / "manual"
     "reviewed": false                   # 전문의 검수 여부 (검수 후 true로)
@@ -146,7 +146,7 @@ def build_checklist(engine, gold_df, vital_map, gold_refs, context_refs=None):
                 "gold_text": gold, "reviewed": False}
 
         if not gold:
-            # 교수님 gold 없음 → 수기 작성 필요 (예: idx 12 Crouzon, c10 입력 누락)
+            # 교수님 gold 없음 → 수기 작성 필요 (c10 입력 누락 케이스)
             checklist[str(sid)] = {**base, "is_normal_case": False, "items": [],
                                    "source": "no_gold", "needs_manual": True}
             continue

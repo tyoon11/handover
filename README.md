@@ -1,77 +1,77 @@
 # 소아수술실 인계요약지 생성 파이프라인
 
-## 파일 구조
+수술 후 OR→PACU/ICU 초간결 인계문(1~5문장 한국어) 생성 — SFT/RLAIF(DPO·SimPO) 비교 연구.
 
-```
-handover/
-├── config.py            # 전체 설정 (경로·하이퍼파라미터·프롬프트)
-├── vital_summarizer.py  # 바이탈 측정값 → 한국어 요약 텍스트 (rule-based)
-├── 00_preprocess.py     # EMR 전처리 + split + 바이탈 summary map 생성
-├── 01_synthetic_gen.py  # 합성데이터 생성 + LLM-as-Judge 채점 + chosen/rejected 선정
-├── 02_sft_train.py      # Synthetic SFT (LoRA)
-├── 03_rlaif_train.py    # Self-Judge RLAIF (DPO / SimPO)
-├── 04_inference.py      # 학습된 모델 배치 inference
-└── 05_evaluate.py       # LLM-as-Judge (Prometheus) + SCALE 평가
-```
+> **현재 유효 코드는 `pipeline_v3/` 하나다.**
+> v1(`pipeline/`, `config.py`)·v2(`config_v2.py`, `pipeline/eval_v2/`)는 legacy 봉인 —
+> 결함 목록과 재설계 근거는 `CODE_REVIEW_V3_PROPOSAL.md`, v3 프로토콜은 `PIPELINE_V3.md` 참고.
+> **v1 sum_score 기반 순위는 어떤 보고에도 인용 금지** (평가셋 유출·judge 순환·절단 버그 중첩).
 
-## 실행 순서
+## 시작하기 (폐쇄망 서버)
 
 ```bash
-# 1. 전처리 (1회)
-python 00_preprocess.py
+git pull
+bash scripts/install_hooks.sh        # pre-commit PHI 가드 (필수)
+pip install -r requirements.txt      # 내부 미러 기준
 
-# 2. 합성데이터 생성 (시간 오래 걸림, GPU 필요)
-python 01_synthetic_gen.py
-
-# 3. 학습 (모델 × epoch 수 조합)
-python 02_sft_train.py --base llama --epochs 1
-python 02_sft_train.py --base llama --epochs 3
-python 02_sft_train.py --base qwen  --epochs 1
-python 02_sft_train.py --base qwen  --epochs 3
-
-# 4. RLAIF (loss × SFT 유무 조합)
-python 03_rlaif_train.py --base llama --loss dpo                   # Raw + DPO
-python 03_rlaif_train.py --base llama --loss simpo                 # Raw + SimPO
-python 03_rlaif_train.py --base llama --loss dpo  --sft_epochs 1  # SFT1ep + DPO
-python 03_rlaif_train.py --base llama --loss dpo  --sft_epochs 3  # SFT3ep + DPO
-python 03_rlaif_train.py --base qwen  --loss dpo  --sft_epochs 3
-
-# 5. Inference (모델별)
-python 04_inference.py --model_path models/sft_llama_3ep/final
-python 04_inference.py --model_path models/rlaif_sft3ep_dpo_llama/final
-# ...
-
-# 6. 평가
-python 05_evaluate.py --result_pkl "outputs/inference_*.pkl"
+# 경로가 기본값과 다르면:
+export HANDOVER_BASE_DIR=/home/coder/workspace/data/handover
+export HANDOVER_MODEL_DIR=/home/coder/workspace/data/local_models
 ```
 
-## 비교 실험 매트릭스
+필요 데이터(서버 `DATA_DIR`에 있어야 함): v1과 동일한 pkl들
+(`gold_sampled_251008.pkl`, `jsft_251008.pkl`, `selfjudge_251008.pkl`, `rlhf_251008.pkl`,
+`vital_summary_map.pkl`) + `gold_sampled/인계요약지_gold_sampled_251002_KHS.xlsx`
++ `gold_sampled/인계요약지_SY.xlsx` + **`preprocessed/khs_gold_remap.json`**
+(수술ID remap — PHI라서 repo에 없음; 기존 작업 PC의 `data/preprocessed/`에서 복사).
 
-| # | 모델 | SFT | RLAIF | 비고 |
-|---|------|-----|-------|------|
-| 1 | Llama-3.1-8B-Instruct | ✗ | ✗ | Raw baseline |
-| 2 | Llama-3.1-8B-Instruct | ✗ | DPO | RLAIF only |
-| 3 | Llama-3.1-8B-Instruct | ✗ | SimPO | RLAIF only |
-| 4 | Llama-3.1-8B-Instruct | 1ep | ✗ | SFT only |
-| 5 | Llama-3.1-8B-Instruct | 3ep | ✗ | SFT only |
-| 6 | Llama-3.1-8B-Instruct | 1ep | DPO | SFT+RLAIF |
-| 7 | Llama-3.1-8B-Instruct | 3ep | DPO | SFT+RLAIF (최고 성능) |
-| 8 | Qwen3-8B | ✗ | ✗ | Raw baseline |
-| 9 | Qwen3-8B | 1ep | ✗ | SFT only |
-| 10 | Qwen3-8B | 3ep | ✗ | SFT only |
-| 11 | Qwen3-8B | 3ep | DPO | SFT+RLAIF |
+## 실행 순서 (요약 — 상세는 PIPELINE_V3.md §6)
 
-## 평가 지표
+```bash
+# 1회 준비물
+python -m pipeline_v3.make_fewshot_bank        --gpus 0,1,2,3
+python -m pipeline_v3.build_gold_checklist_v3  --gpus 0,1,2,3
+python -m pipeline_v3.eval_v3.calibrate        --gpus 0,1,2,3
 
-| 지표 | 도구 | 범위 |
-|------|------|------|
-| Brevity & Relevance | Prometheus-8x7b-v2.0 | 1~5 |
-| Critical Focus | Prometheus-8x7b-v2.0 | 1~5 |
-| SUM | — | 2~10 |
-| Factual Consistency | Flan-T5-large/xl (SCALE) | 0~1 |
-| Text Length | 단어 수 | — |
+# SFT 타깃 생성 (1회 공유)
+python -m pipeline_v3.gen_pairs --split sft --models llama qwen --gpus 0,1,2,3
 
-## Threshold 출처 요약
+# 학습 → on-policy 쌍 → RLAIF → 추론 → dev 평가
+python -m pipeline_v3.run_all_v3 --models llama qwen --gpus 0,1,2,3 --gpus_per_job 2 --skip_done
+
+# 최종 1회 (gold 22 개봉 — dev로 선택 끝난 뒤에만)
+python -m pipeline_v3.run_all_v3 --models llama qwen --gpus 0,1,2,3 --gpus_per_job 2 --skip_done --final
+```
+
+## 실험 매트릭스 (모델당 7변형)
+
+raw / rlaif_dpo / rlaif_simpo / sft_1ep / sft_3ep / sft_1ep_dpo / sft_3ep_dpo
+— 결과는 `outputs_v3/<run>/report/results_{dev,gold}_v3.md`
+(3축+CI, raw 대비 permutation p(Holm), judge 일치도, 제외 케이스 표).
+
+## 평가 요약 (v3)
+
+| 축 | 정의 | judge |
+|---|---|---|
+| coverage (0.5) | 전문의 gold checklist recall (macro+micro) | gemma4_31b + qwen35 교차 |
+| faithfulness (0.3) | claim의 EMR entailment (주입 방어 구분자) | 〃 |
+| brevity (0.2) | 과설명/행정 노이즈 감점 | 〃 |
+
+- 이상소견 케이스에 "특이사항 없음" → composite 0 (안전게이트, `gate=missed_abnormal`)
+- judge 실패/gold 부재는 점수가 아니라 **제외**로 집계 (유효비율 <80%면 평가 실패 처리)
+- 선호쌍 생성 judge는 prometheus — 평가 judge와 분리(순환 금지)
+
+## 보안 / PHI (필독)
+
+- 환자 데이터가 들어가는 확장자(`*.pkl, *.xlsx, *.html, *.jsonl, *.log`)와 `data/`,
+  `outputs*/`는 gitignore + pre-commit 훅이 이중 차단한다. **훅 설치 필수.**
+- 실제 수술ID는 코드/문서에 쓰지 않는다 — 필요하면 `data/` 밑 JSON(예: `khs_gold_remap.json`).
+- `utils/download_models.py`의 TLS 우회는 `HANDOVER_INSECURE_SSL=1`일 때만 동작.
+- **남은 사람 작업**: ① GitHub PAT(.env) 즉시 revoke 후 파일 삭제,
+  ② repo private 전환 또는 `git filter-repo`로 과거 이력의 수술ID 스크럽
+  (이력에 이미 push된 P0-3 항목은 새 커밋으로는 지워지지 않는다).
+
+## 바이탈 threshold 출처 (v1에서 유지)
 
 | 항목 | 기준 | 출처 |
 |------|------|------|
@@ -81,24 +81,8 @@ python 05_evaluate.py --result_pkl "outputs/inference_*.pkl"
 | MBP 저혈압 | 1.5×age(yr)+40 | PMID 17273118 |
 | DBP 저/고 | 연령별 5th/90th pct | AAP 4th Report |
 | QTc | <8세 >450ms, ≥8세 >460ms | PMID 16482041 |
-| SpO2 | <95% / <90% | —  |
+| SpO2 | <95% / <90% | — |
 | T1 | <35.5°C / >38.0°C | — |
-
-## 주요 하이퍼파라미터
-
-```python
-# LoRA
-r=8, lora_alpha=16, lora_dropout=0.1
-
-# SFT
-lr=2e-5, batch=2, grad_accum=4, epochs=1 or 3
-
-# RLAIF
-lr=5e-6, batch=2, grad_accum=4, epochs=3
-
-# Generation
-max_input_len=2048, max_output_len=768
-```
 
 ## IRB / DRB
 

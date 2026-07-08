@@ -157,7 +157,15 @@ def print_status(targets):
 
 
 def _patch_httpx_ssl():
-    """SSL 인증서 검증 우회 (self-signed certificate 환경 대응)"""
+    """SSL 인증서 검증 우회 — 병원 프록시(self-signed cert) 환경 전용.
+
+    보안: 무조건 끄면 HF 토큰이 미검증 TLS로 전송된다. 반드시 env로 opt-in:
+      HANDOVER_INSECURE_SSL=1 python utils/download_models.py ...
+    가능하면 대신 REQUESTS_CA_BUNDLE=<병원 프록시 CA.pem>을 지정할 것.
+    """
+    if os.environ.get("HANDOVER_INSECURE_SSL") != "1":
+        return
+    print("[WARN] HANDOVER_INSECURE_SSL=1 — TLS 검증 비활성 (토큰 노출 위험, 신뢰된 망에서만)")
     try:
         import httpx
 

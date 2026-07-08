@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# pre-commit PHI 가드 — staged 파일에서 내부 수술ID/등록번호/환자데이터 파일을 검출하면 커밋 차단.
+# 설치: bash scripts/install_hooks.sh   (git config core.hooksPath .githooks)
+# 우회(정말 필요할 때만): git commit --no-verify
+set -u
+
+fail=0
+
+# 1) 환자 데이터가 들어가는 파일 형식은 확장자 자체를 차단
+BLOCKED_EXT='\.(pkl|xlsx|jsonl|html|log)$'
+staged_files=$(git diff --cached --name-only --diff-filter=ACM)
+for f in $staged_files; do
+    if echo "$f" | grep -qE "$BLOCKED_EXT"; then
+        echo "[PHI-GUARD] 차단: '$f' — 환자 데이터 가능 확장자는 커밋 금지 (.gitignore 확인)" >&2
+        fail=1
+    fi
+    case "$f" in
+        .env|*.token|khs_dump*)
+            echo "[PHI-GUARD] 차단: '$f' — 비밀/덤프 파일" >&2
+            fail=1 ;;
+    esac
+done
+
+# 2) staged 내용에서 내부 수술ID(1005+5자리) / 8자리 병원등록번호 의심 패턴 검출
+#    (텍스트 diff만 검사; 바이너리는 1)에서 이미 차단됨)
+PATTERN='\b1005[0-9]{5}\b'
+matches=$(git diff --cached -U0 | grep -E '^\+' | grep -vE '^\+\+\+' | grep -nE "$PATTERN" || true)
+if [ -n "$matches" ]; then
+    echo "[PHI-GUARD] 차단: staged diff에 내부 수술ID 패턴(1005xxxxx) 검출:" >&2
+    echo "$matches" | head -10 >&2
+    echo "  → 실제 ID는 repo에 커밋하지 말고 data/ 밑 JSON(gitignored)으로 옮기세요." >&2
+    fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+    echo "" >&2
+    echo "커밋이 차단되었습니다. 위 항목을 정리한 뒤 다시 커밋하세요." >&2
+    exit 1
+fi
+exit 0
