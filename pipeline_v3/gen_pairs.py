@@ -47,8 +47,8 @@ import numpy as np                      # noqa: E402
 import pandas as pd                     # noqa: E402
 
 from .config_v3 import (                # noqa: E402
-    JUDGE_MAX_MODEL_LEN, MAX_PROMPT_TOKENS, PAIRGEN, PAIRGEN_JUDGE, PAIRS_OUT,
-    SPLIT_SEED, ensure_dir, model_path,
+    JUDGE_MAX_MODEL_LEN, MAX_COMPLETION_TOKENS, MAX_PROMPT_TOKENS, PAIRGEN,
+    PAIRGEN_JUDGE, PAIRS_OUT, SPLIT_SEED, ensure_dir, model_path,
 )
 from .data_splits import load_splits, write_split_manifest      # noqa: E402
 from .eval_v3.cleaning import clean_v3                           # noqa: E402
@@ -75,43 +75,106 @@ def fewshot_block_for_row(bank: list, row_idx: int, n_shot: int) -> str:
     return "\n".join(parts)
 
 
-# ── 후보 생성 (vLLM: greedy 1 + temperature K — T8) ─────────────────────────
-def generate_candidates(gen_model_dir: str, gen_key: str, rows: list, bank: list):
-    """rows: [{row_idx, sid, emr, vital}] → {row_idx: [candidate_text, ...]} (정제·dedup 전)"""
-    from transformers import AutoTokenizer
-    from vllm import LLM, SamplingParams
-
-    tok = AutoTokenizer.from_pretrained(gen_model_dir, trust_remote_code=True)
-
+# ── 후보 생성 (greedy 1 + temperature K — T8) ────────────────────────────────
+# vLLM 우선, 실패 시 HF 폴백 (JudgeEngine/inference와 동일 정책 — vLLM 전용 chokepoint 제거).
+def _build_gen_prompts(tok, rows, bank):
     prompts = []
     for r in rows:
         fs = fewshot_block_for_row(bank, r["row_idx"], PAIRGEN["n_fewshot"])
         prompts.append(fit_chat_prompt(
             tok, r["emr"], r["vital"], system=SYSTEM_PROMPT,
             budget=MAX_PROMPT_TOKENS, enable_thinking=False, fewshot_block=fs))
+    return prompts
 
+
+def _gen_vllm(gen_model_dir, prompts, rows):
+    import gc
     import torch
+    from vllm import LLM, SamplingParams
     llm = LLM(model=gen_model_dir, tensor_parallel_size=max(1, torch.cuda.device_count()),
               dtype="bfloat16", gpu_memory_utilization=0.90,
               max_model_len=MAX_PROMPT_TOKENS + 640, trust_remote_code=True)
-
     out = {r["row_idx"]: [] for r in rows}
-    # (1) greedy
-    sp_g = SamplingParams(max_tokens=512, temperature=0.0)
+    sp_g = SamplingParams(max_tokens=MAX_COMPLETION_TOKENS, temperature=0.0)
     for r, o in zip(rows, llm.generate(prompts, sp_g)):
         out[r["row_idx"]].append(o.outputs[0].text.strip())
-    # (2) temperature 샘플 K개 (한 요청에 n개 — vLLM이 병렬 처리)
-    sp_s = SamplingParams(max_tokens=512, temperature=PAIRGEN["temperature"],
-                          top_p=PAIRGEN["top_p"], n=PAIRGEN["n_samples"],
-                          seed=SPLIT_SEED)
+    sp_s = SamplingParams(max_tokens=MAX_COMPLETION_TOKENS, temperature=PAIRGEN["temperature"],
+                          top_p=PAIRGEN["top_p"], n=PAIRGEN["n_samples"], seed=SPLIT_SEED)
     for r, o in zip(rows, llm.generate(prompts, sp_s)):
         out[r["row_idx"]].extend(c.text.strip() for c in o.outputs)
-
     del llm
-    import gc
     gc.collect()
     torch.cuda.empty_cache()
     return out
+
+
+def _gen_hf(gen_model_dir, prompts, rows):
+    """HF 배치 생성 폴백 (느리지만 vLLM 불가 환경에서도 동작). greedy 1 + 샘플 K."""
+    import gc
+    import torch
+    from tqdm import tqdm
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(gen_model_dir, trust_remote_code=True)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    tok.padding_side = "left"
+    tok.truncation_side = "left"
+    mm = {i: "40GiB" for i in range(max(1, torch.cuda.device_count()))}
+    model = AutoModelForCausalLM.from_pretrained(
+        gen_model_dir, dtype=torch.bfloat16, device_map="auto", max_memory=mm,
+        low_cpu_mem_usage=True, trust_remote_code=True)
+    model.eval()
+
+    order = [r["row_idx"] for r in rows]
+    out = {r["row_idx"]: [] for r in rows}
+    bs = 4
+
+    def _run(do_sample, n, tag):
+        if do_sample:
+            torch.manual_seed(SPLIT_SEED)      # 샘플 재현성
+        for i in tqdm(range(0, len(prompts), bs), desc=f"HF gen {tag}"):
+            batch = prompts[i:i + bs]
+            ridx = order[i:i + bs]
+            enc = tok(batch, return_tensors="pt", padding=True, truncation=True,
+                      max_length=MAX_PROMPT_TOKENS).to(model.device)
+            kw = dict(max_new_tokens=MAX_COMPLETION_TOKENS, pad_token_id=tok.eos_token_id,
+                      num_return_sequences=n)
+            if do_sample:
+                kw.update(do_sample=True, temperature=PAIRGEN["temperature"],
+                          top_p=PAIRGEN["top_p"])
+            else:
+                kw.update(do_sample=False)
+            with torch.no_grad():
+                gen = model.generate(**enc, **kw)
+            gen = gen[:, enc["input_ids"].shape[1]:]
+            for b in range(len(batch)):
+                for s in range(n):
+                    txt = tok.decode(gen[b * n + s], skip_special_tokens=True).strip()
+                    out[ridx[b]].append(txt)
+
+    _run(False, 1, "greedy")
+    _run(True, PAIRGEN["n_samples"], "sample")
+    del model
+    gc.collect()
+    torch.cuda.empty_cache()
+    return out
+
+
+def generate_candidates(gen_model_dir: str, gen_key: str, rows: list, bank: list,
+                        backend: str = "auto"):
+    """rows: [{row_idx, sid, emr, vital}] → {row_idx: [candidate_text, ...]} (정제·dedup 전)"""
+    from transformers import AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(gen_model_dir, trust_remote_code=True)
+    prompts = _build_gen_prompts(tok, rows, bank)
+    if backend in ("auto", "vllm"):
+        try:
+            return _gen_vllm(gen_model_dir, prompts, rows)
+        except Exception as e:
+            print(f"[gen_pairs] vLLM 생성 실패({type(e).__name__}: {str(e)[:200]})")
+            if backend == "vllm":
+                raise
+            print("[gen_pairs] → HF 생성으로 fallback (느림, 배치)")
+    return _gen_hf(gen_model_dir, prompts, rows)
 
 
 def _normalize(text: str) -> str:
@@ -334,7 +397,7 @@ def main():
     n_drop_total = 0
     for gen_key, gen_dir in gen_specs:
         print(f"\n[gen_pairs] 후보 생성: {gen_key} ({gen_dir})")
-        raw_map = generate_candidates(gen_dir, gen_key, rows, bank)
+        raw_map = generate_candidates(gen_dir, gen_key, rows, bank, backend=args.backend)
         for ridx, cands in raw_map.items():
             cand_map[ridx].extend(cands)
 
