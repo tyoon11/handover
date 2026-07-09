@@ -97,8 +97,23 @@ class GpuPool:
         self._q.put(g)
 
 
+def _libstdcxx_preload_env(env: dict) -> dict:
+    """vLLM/zmq의 GLIBCXX 요구를 위해 conda libstdc++를 자식 env의 LD_PRELOAD에 주입.
+    LD_PRELOAD는 프로세스 시작 시점에만 유효하므로, 여기서 자식에게 넘겨야 먹힌다
+    (부모가 in-process로 os.environ만 바꾸면 소급 적용 안 됨). 사용자가 셸에서 이미
+    export 했으면 os.environ.copy()에 들어와 있어 그대로 유지된다."""
+    prefix = env.get("CONDA_PREFIX")
+    if not prefix:
+        return env
+    lib = os.path.join(prefix, "lib", "libstdc++.so.6")
+    if os.path.exists(lib) and lib not in env.get("LD_PRELOAD", "").split(":"):
+        cur = env.get("LD_PRELOAD", "")
+        env["LD_PRELOAD"] = lib + (":" + cur if cur else "")
+    return env
+
+
 def run_cmd(cmd: list, desc: str, gpus: str, tag: str = "") -> bool:
-    env = os.environ.copy()
+    env = _libstdcxx_preload_env(os.environ.copy())
     env["CUDA_VISIBLE_DEVICES"] = gpus
     prefix = f"[{tag} GPU:{gpus}]" if tag else f"[GPU:{gpus}]"
     log(f"  {prefix} {desc}: {' '.join(str(c) for c in cmd)}")

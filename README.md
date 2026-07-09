@@ -17,6 +17,9 @@ pip install -r requirements.txt      # 내부 미러 기준
 # 경로가 기본값과 다르면:
 export HANDOVER_BASE_DIR=/home/coder/workspace/data/handover
 export HANDOVER_MODEL_DIR=/home/coder/workspace/data/local_models
+
+# vLLM GLIBCXX/zmq 이슈 방지 (세션당 1회 — 안 하면 vLLM이 조용히 HF로 폴백해 매우 느려짐)
+export LD_PRELOAD=$CONDA_PREFIX/lib/libstdc++.so.6
 ```
 
 필요 데이터(서버 `DATA_DIR`에 있어야 함): v1과 동일한 pkl들

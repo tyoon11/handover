@@ -126,6 +126,12 @@
 bash scripts/install_hooks.sh
 # data/preprocessed/khs_gold_remap.json 을 서버 DATA_DIR에 복사 (로컬 data/에 있음, repo엔 없음)
 
+# ★ vLLM GLIBCXX/zmq 이슈 방지 — python 시작 전에 셸에서 export (세션당 1회).
+#   LD_PRELOAD는 프로세스 시작 시점에만 유효하므로 반드시 셸에서 export할 것.
+#   (run_all_v3는 자식 프로세스에 자동 주입하지만, 수동 스텝은 이 export가 필요)
+export LD_PRELOAD=$CONDA_PREFIX/lib/libstdc++.so.6
+#   확인: strings $CONDA_PREFIX/lib/libstdc++.so.6 | grep -c GLIBCXX_3.4.29  → 1 이상이어야 함
+
 # (1) 1회 준비 (judge/writer GPU 4장)
 python -m pipeline_v3.make_fewshot_bank --gpus 0,1,2,3
 python -m pipeline_v3.build_gold_checklist_v3 --gpus 0,1,2,3     # (+검수 후 reviewed:true)
