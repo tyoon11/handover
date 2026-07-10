@@ -119,6 +119,22 @@
 - `reviewed`는 **사람만** 설정. `--accept`는 `accepted_without_review=true` 별도 플래그.
   모든 리포트에 "전문의검수 n / 잠정채택 n / 잠정 n"이 그대로 표기된다.
 
+## 5.9 오케스트레이터 Phase 구조 (run_all_v3)
+
+GPU 배분이 단계마다 다르다 — **prometheus 쌍생성 judge(47B MoE)는 ≥3장 필요**하므로:
+
+| Phase | 작업 | GPU |
+|---|---|---|
+| A | SFT 학습 | 2-GPU **병렬** (`gpus_per_job`) |
+| B | DPO 선호쌍 생성(on-policy, prometheus judge) | **전체 GPU 직렬** (`--gpus` 통째) |
+| C | RLAIF(DPO/SimPO) 학습 | 2-GPU **병렬** |
+| D | 추론 dev(+gold if `--final`) | 2-GPU **병렬** |
+| E | 평가 + 리포트 | `eval_gpus`(전체) / CPU |
+
+- 무거운 학습은 병렬로, prometheus judge가 필요한 B만 전체 GPU를 잡고 직렬로 돈다.
+- 같은 정책을 쓰는 여러 loss(dpo/simpo)는 쌍을 **1회만** 생성해 공유(raw 정책 등).
+- 각 잡은 `.done` 마커+체크포인트 유효성으로 skip 판정(B2), 선행 없으면 자기검사 후 실패 처리.
+
 ## 6. 실행 순서 (폐쇄망 서버)
 
 ```bash

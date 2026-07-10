@@ -167,22 +167,51 @@ def ensure_sft(model, ep, gpus, skip_done) -> bool:
                     "--epochs", str(ep)], f"SFT {ep}ep", gpus, f"{model}")
 
 
-def ensure_dpo_pairs(model, exp_key, gpus, skip_done) -> bool:
-    pkl = _pairs_dpo_pkl(model, exp_key)
+def gen_dpo_pairs(model, kind, ep, gpus, skip_done) -> bool:
+    """정책별 on-policy DPO 쌍 생성 (Phase B — prometheus 47B judge라 gpus=전체).
+    kind='raw'(base 정책) / 'sft'(SFT ep 정책). 같은 정책이면 1회만 생성(여러 loss가 공유)."""
+    if kind == "raw":
+        out_tag = f"{model}_raw"
+        pkl = PAIRS_OUT / f"pairs_dpo_{model}_raw.pkl"
+        extra = []
+    else:
+        out_tag = f"{model}_sft{ep}ep"
+        pkl = PAIRS_OUT / f"pairs_dpo_{model}_sft{ep}ep.pkl"
+        sft_final = _sft_dir(model, ep) / "final"
+        if not ckpt_valid(sft_final):
+            log(f"  [실패] {model} sft{ep}ep 체크포인트 없음 → DPO쌍 생성 불가")
+            return False
+        extra = ["--policy_ckpt", str(sft_final)]
     if skip_done and pkl.exists():
         log(f"  [SKIP] pairs {pkl.name}")
         return True
-    cmd = [PY, "-m", "pipeline_v3.gen_pairs", "--split", "dpo", "--base", model]
-    if exp_key.startswith("sft_"):
-        ep = exp_key.split("_")[1]
-        sft_final = _sft_dir(model, ep.replace("ep", "")) / "final"
-        if not ckpt_valid(sft_final):
-            log(f"  [실패] {model}/{exp_key}: 선행 SFT 없음 → 쌍 생성 불가")
-            return False
-        cmd += ["--policy_ckpt", str(sft_final), "--out_tag", f"{model}_sft{ep}"]
-    else:
-        cmd += ["--out_tag", f"{model}_raw"]
-    return run_cmd(cmd, f"gen_pairs dpo({exp_key})", gpus, f"{model}")
+    cmd = [PY, "-m", "pipeline_v3.gen_pairs", "--split", "dpo", "--base", model,
+           "--out_tag", out_tag] + extra
+    return run_cmd(cmd, f"gen_pairs dpo({out_tag})", gpus, model)
+
+
+def _needed_sft_eps(exps):
+    """활성 실험이 요구하는 SFT epoch 집합 (sft_* 변형 + dpo-on-sft의 선행)."""
+    eps = set()
+    for (_key, sft_ep, _loss, dep) in exps:
+        if sft_ep is not None:
+            eps.add(sft_ep)
+        if dep:
+            eps.add(int(dep.split("_")[1].replace("ep", "")))
+    return sorted(eps)
+
+
+def _needed_policies(exps):
+    """DPO 쌍이 필요한 (정책종류, ep) 유니크 목록. 여러 loss(dpo/simpo)가 같은 정책을 공유."""
+    pol = set()
+    for (_key, _sft_ep, loss, dep) in exps:
+        if loss is None:
+            continue
+        if dep is None:
+            pol.add(("raw", None))
+        else:
+            pol.add(("sft", int(dep.split("_")[1].replace("ep", ""))))
+    return sorted(pol, key=lambda p: (p[0], p[1] or 0))
 
 
 def ensure_rlaif(model, exp_key, loss, gpus, skip_done) -> bool:
@@ -226,28 +255,29 @@ def ensure_infer(model, exp_key, split, gpus, skip_done, allow_gold=False) -> bo
     return run_cmd(cmd, f"Inference({split})", gpus, f"{model}/{exp_key}")
 
 
-def model_chain(model, exps, pool: GpuPool, skip_done, final) -> dict:
-    """모델 하나의 전체 체인 (SFT → 쌍 → RLAIF → 추론). GPU 그룹 1개 점유."""
+def _slot_run(fn, pool: GpuPool):
     gpus = pool.acquire()
-    results = {}
     try:
-        for exp in exps:
-            exp_key, sft_ep, loss, dep = exp
-            ok = True
-            if sft_ep is not None:
-                ok = ensure_sft(model, sft_ep, gpus, skip_done)
-            if ok and loss is not None:
-                ok = ensure_dpo_pairs(model, exp_key, gpus, skip_done) and \
-                    ensure_rlaif(model, exp_key, loss, gpus, skip_done)
-            if ok:
-                ok = ensure_infer(model, exp_key, "dev", gpus, skip_done)
-            if ok and final:
-                ok = ensure_infer(model, exp_key, "gold", gpus, skip_done,
-                                  allow_gold=True)
-            results[exp_key] = ok
-            log(f"[chain] {model}/{exp_key}: {'✓' if ok else '✗'}")
+        return fn(gpus)
     finally:
         pool.release(gpus)
+
+
+def run_phase_parallel(title, jobs, pool: GpuPool) -> dict:
+    """jobs: [(label, fn(gpus)->bool)]. GPU 슬롯 풀로 병렬 실행 (학습/추론용)."""
+    if not jobs:
+        return {}
+    log(f"\n{'=' * 60}\n=== {title} (병렬 {pool.n}슬롯, {len(jobs)}잡) ===\n{'=' * 60}")
+    results = {}
+    with ThreadPoolExecutor(max_workers=max(1, pool.n)) as ex:
+        futs = {label: ex.submit(_slot_run, fn, pool) for label, fn in jobs}
+        for label, f in futs.items():
+            try:
+                results[label] = f.result()
+            except Exception as e:
+                log(f"  [{label}] 오류: {e}")
+                results[label] = False
+            log(f"  [{label}] {'✓' if results.get(label) else '✗'}")
     return results
 
 
@@ -357,17 +387,49 @@ def main():
             f"python -m pipeline_v3.build_gold_checklist_v3 --gpus {eval_gpus}")
         sys.exit(2)
 
-    # ── Phase 1: 모델 체인 병렬 ──
+    # ── 학습·추론은 2-GPU 병렬(A/C/D), DPO 쌍 생성만 전체 GPU 직렬(B, prometheus 47B) ──
     if not args.only_eval:
         pool = GpuPool(args.gpus, args.gpus_per_job)
-        with ThreadPoolExecutor(max_workers=max(1, pool.n)) as ex:
-            futs = {m: ex.submit(model_chain, m, exps, pool, args.skip_done,
-                                 args.final) for m in args.models}
-            for m, f in futs.items():
-                try:
-                    f.result()
-                except Exception as e:
-                    log(f"[chain 오류] {m}: {e}")
+        sd = args.skip_done
+
+        # Phase A — SFT 학습 (병렬)
+        run_phase_parallel(
+            "Phase A: SFT 학습",
+            [(f"{m}/sft{ep}ep",
+              (lambda g, m=m, ep=ep: ensure_sft(m, ep, g, sd)))
+             for m in args.models for ep in _needed_sft_eps(exps)],
+            pool)
+
+        # Phase B — DPO 선호쌍 생성 (직렬, 전체 GPU: prometheus 47B judge가 ≥3장 필요)
+        policies = _needed_policies(exps)
+        if policies:
+            log(f"\n{'=' * 60}\n=== Phase B: DPO 선호쌍 (직렬, 전체 GPU {args.gpus} — "
+                f"prometheus 47B) ===\n{'=' * 60}")
+            for m in args.models:
+                for kind, ep in policies:
+                    ok = gen_dpo_pairs(m, kind, ep, args.gpus, sd)
+                    log(f"  [pairs {m}/{kind}{ep or ''}] {'✓' if ok else '✗'}")
+
+        # Phase C — RLAIF 학습 (병렬)
+        run_phase_parallel(
+            "Phase C: RLAIF 학습",
+            [(f"{m}/{e[0]}",
+              (lambda g, m=m, e=e: ensure_rlaif(m, e[0], e[2], g, sd)))
+             for m in args.models for e in exps if e[2] is not None],
+            pool)
+
+        # Phase D — 추론 (병렬): dev(+gold if --final)
+        d_jobs = []
+        for m in args.models:
+            for e in exps:
+                d_jobs.append((f"{m}/{e[0]}/dev",
+                               (lambda g, m=m, e=e: ensure_infer(m, e[0], "dev", g, sd))))
+                if args.final:
+                    d_jobs.append((f"{m}/{e[0]}/gold",
+                                   (lambda g, m=m, e=e: ensure_infer(
+                                       m, e[0], "gold", g, sd, allow_gold=True))))
+        run_phase_parallel("Phase D: 추론", d_jobs, pool)
+
         provenance(args.models, exps)
 
     # ── Phase 2: 평가 ──
