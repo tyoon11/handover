@@ -145,19 +145,24 @@ def train(args):
     shared = dict(output_dir=str(output_dir), seed=42, report_to="none",
                   gradient_checkpointing=True,
                   gradient_checkpointing_kwargs={"use_reentrant": False},
-                  # T5 핵심: 두 트레이너 모두 동일 프롬프트/시퀀스 예산
-                  max_prompt_length=MAX_PROMPT_TOKENS,
+                  # T5 핵심: 두 트레이너 모두 동일 총 시퀀스 예산.
+                  # (프롬프트 예산은 build_dpo_dataset의 fit_user_content(budget=MAX_PROMPT_TOKENS)에서
+                  #  이미 절단 — 아래 max_prompt_length는 SimPO의 2차 안전망일 뿐.)
                   max_length=MAX_SEQ_TOKENS,
                   **cfg)
 
     if args.loss == "simpo":
         from trainers.simpo_config import SimPOConfig
         from trainers.simpo_trainer import SimPOTrainer
+        # SimPOConfig는 TrainingArguments 상속 커스텀이라 max_prompt_length를 자체 필드로 가짐 (TRL 비의존)
         simpo_cfg = SimPOConfig(beta=SIMPO_BETA,
-                                gamma_beta_ratio=SIMPO_GAMMA_BETA_RATIO, **shared)
+                                gamma_beta_ratio=SIMPO_GAMMA_BETA_RATIO,
+                                max_prompt_length=MAX_PROMPT_TOKENS, **shared)
         trainer = SimPOTrainer(model=model, args=simpo_cfg,
                                train_dataset=dataset, tokenizer=tokenizer)
     else:
+        # trl>=1.x: DPOConfig에서 max_prompt_length 제거됨(max_length·truncation_mode만 남음).
+        # 프롬프트는 데이터 생성 시점에 이미 MAX_PROMPT_TOKENS로 절단되므로 max_length 총캡만으로 충분.
         from trl import DPOConfig, DPOTrainer
         dpo_cfg = DPOConfig(loss_type="sigmoid", beta=DPO_BETA, **shared)
         trainer = DPOTrainer(model=model, ref_model=None, args=dpo_cfg,
