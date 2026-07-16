@@ -46,7 +46,7 @@ os.environ["HANDOVER_RUN_ID"] = _RID
 print(f"[RUN v3] HANDOVER_RUN_ID={_RID}")
 
 from .config_v3 import (       # noqa: E402
-    EVAL_OUT, GOLD_CHECKLIST_JSON, INFER_OUT, OUTPUT_BASE, PAIRS_OUT,
+    EVAL_OUT, GEMMA4_BASES, GOLD_CHECKLIST_JSON, INFER_OUT, OUTPUT_BASE, PAIRS_OUT,
     PAIRS_SFT_PKL, PROVENANCE_JSON, RLAIF_OUT, SFT_OUT, TRAIN_KEYS, ensure_dir,
     model_path,
 )
@@ -112,9 +112,11 @@ def _libstdcxx_preload_env(env: dict) -> dict:
     return env
 
 
-def run_cmd(cmd: list, desc: str, gpus: str, tag: str = "") -> bool:
+def run_cmd(cmd: list, desc: str, gpus: str, tag: str = "", extra_env: dict = None) -> bool:
     env = _libstdcxx_preload_env(os.environ.copy())
     env["CUDA_VISIBLE_DEVICES"] = gpus
+    if extra_env:
+        env.update({k: str(v) for k, v in extra_env.items()})
     prefix = f"[{tag} GPU:{gpus}]" if tag else f"[GPU:{gpus}]"
     log(f"  {prefix} {desc}: {' '.join(str(c) for c in cmd)}")
     t0 = time.time()
@@ -124,6 +126,13 @@ def run_cmd(cmd: list, desc: str, gpus: str, tag: str = "") -> bool:
 
 
 PY = sys.executable
+
+
+def _train_env(model):
+    """gemma 계열 학습은 비동기 CUDA 스트림 race(AccumulateGrad stream mismatch)로
+    cudaErrorLaunchFailure가 간헐 발생 → 자식에 CUDA_LAUNCH_BLOCKING=1 주입해 직렬화(결과 동일).
+    torch 2.11/transformers 5.8 + gemma4 + device_map + grad-checkpoint 조합 이슈."""
+    return {"CUDA_LAUNCH_BLOCKING": "1"} if model in GEMMA4_BASES else None
 
 
 def _sft_dir(model, ep):
@@ -164,7 +173,8 @@ def ensure_sft(model, ep, gpus, skip_done) -> bool:
         log(f"  [SKIP] {model} SFT {ep}ep (.done+유효 체크포인트)")
         return True
     return run_cmd([PY, "-m", "pipeline_v3.sft_train", "--base", model,
-                    "--epochs", str(ep)], f"SFT {ep}ep", gpus, f"{model}")
+                    "--epochs", str(ep)], f"SFT {ep}ep", gpus, f"{model}",
+                   extra_env=_train_env(model))
 
 
 def gen_dpo_pairs(model, kind, ep, gpus, skip_done) -> bool:
@@ -228,7 +238,8 @@ def ensure_rlaif(model, exp_key, loss, gpus, skip_done) -> bool:
     if exp_key.startswith("sft_"):
         ep = exp_key.split("_")[1].replace("ep", "")
         cmd += ["--sft_ckpt", str(_sft_dir(model, ep) / "final")]
-    return run_cmd(cmd, f"RLAIF {exp_key}", gpus, f"{model}")
+    return run_cmd(cmd, f"RLAIF {exp_key}", gpus, f"{model}",
+                   extra_env=_train_env(model))
 
 
 def ensure_infer(model, exp_key, split, gpus, skip_done, allow_gold=False) -> bool:
