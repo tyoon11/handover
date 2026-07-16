@@ -140,7 +140,72 @@ def _num(v, nd=3):
         return ihtml.escape(str(v))
 
 
-def write_outputs(split, rows, pw, scores=None):
+# ── 소스(EMR/GT) 로드 — --include_source 일 때만 (PHI 최소화 기본값 유지) ──────
+_EMR_DISPLAY_CAP = 2600      # per-case EMR 표시 상한(문자) — 파일 비대 방지
+
+
+def _scrub_phi(text):
+    """직접식별자(병록번호/등록번호/환자명 라벨) 스크럽. build_emr_text는 이미
+    이름·병록번호 '필드'를 미포함하므로, 자유텍스트에 라벨과 함께 박힌 잔여분 방어선."""
+    import re
+    if not text:
+        return ""
+    t = str(text)
+    t = re.sub(r"(병\s*록\s*번\s*호|등\s*록\s*번\s*호|chart\s*(?:no\.?|number)|MRN)"
+               r"\s*[:：]?\s*\S+", "[식별번호 제거]", t, flags=re.I)
+    t = re.sub(r"(환자\s*(?:성명|이름|명)|성\s*명|환자명)\s*[:：]?\s*\S+",
+               "[이름 제거]", t, flags=re.I)
+    return t
+
+
+def _load_sources(split):
+    """{sid: {'emr','vital','gt'}} — 실패 시 {} (호출부에서 안내). EMR은 build_emr_text
+    (임상 필드만; 이름·병록번호 미포함) + _scrub_phi. GT(사람 gold)는 gold split만."""
+    out = {}
+    try:
+        import pickle
+        from .config_v3 import VITAL_MAP_PKL
+        from .data_splits import load_splits
+        from .prompt_utils import build_emr_text, get_sid
+        need = ("gold",) if split == "gold" else ("dev",)
+        splits = load_splits(need=need)
+        df = splits.get(split) if splits.get(split) is not None else splits[need[0]]
+        with open(VITAL_MAP_PKL, "rb") as f:
+            vital_map = pickle.load(f)
+
+        gt_map = {}
+        if split == "gold":
+            try:
+                import pandas as pd
+                from .config_v3 import GOLD_KHS_XLSX, GOLD_PKL
+                from .eval_v3 import checklist as CK
+                gold_df = pd.read_pickle(GOLD_PKL)
+                gold_refs, _drafts = CK.load_khs_gold(GOLD_KHS_XLSX, gold_df)
+                for i in range(len(gold_df)):
+                    s = get_sid(gold_df.iloc[i])
+                    if s != -1 and i in gold_refs:
+                        gt_map[s] = gold_refs[i]
+            except Exception as e:
+                print(f"[report_v3] GT(사람 gold) 로드 실패 → GT 생략 ({type(e).__name__}: {e})")
+
+        for i in range(len(df)):
+            row = df.iloc[i]
+            s = get_sid(row)
+            if s == -1:
+                continue
+            emr = _scrub_phi(build_emr_text(row))
+            if len(emr) > _EMR_DISPLAY_CAP:
+                emr = emr[:_EMR_DISPLAY_CAP] + " …(이하 생략)"
+            out[s] = dict(emr=emr,
+                          vital=_scrub_phi(str(vital_map.get(s, ""))),
+                          gt=(_scrub_phi(gt_map.get(s, "")) or None))
+    except Exception as e:
+        print(f"[report_v3] source 로드 실패 → EMR/GT 생략 ({type(e).__name__}: {e})")
+        return {}
+    return out
+
+
+def write_outputs(split, rows, pw, scores=None, include_source=False):
     scores = scores or {}
     out_dir = ensure_dir(REPORT_OUT)
     # CSV
@@ -197,11 +262,15 @@ def write_outputs(split, rows, pw, scores=None):
               "- vs raw: 공통 유효 케이스 paired permutation test, Holm 보정\n")
     (out_dir / f"results_{split}_v3.md").write_text("".join(md), encoding="utf-8")
 
-    # HTML (리치 — 대시보드 + 케이스 토글, PHI 없는 항목만)
-    html = _build_html(split, rows, pw, scores, rev)
-    (out_dir / f"results_{split}_v3.html").write_text(html, encoding="utf-8")
+    # HTML (리치 — 대시보드 + 케이스 토글). --include_source면 EMR/GT(비식별) 포함.
+    sources = _load_sources(split) if include_source else {}
+    html = _build_html(split, rows, pw, scores, rev, sources)
+    html_name = f"results_{split}_v3_source.html" if include_source \
+        else f"results_{split}_v3.html"
+    (out_dir / html_name).write_text(html, encoding="utf-8")
 
-    print(f"[report_v3] 저장: {out_dir}/results_{split}_v3.(csv|md|html)")
+    print(f"[report_v3] 저장: {out_dir}/results_{split}_v3.(csv|md) + {html_name}"
+          + (" [EMR/GT 포함 — 외부공유 금지]" if include_source else ""))
 
 
 # ── 리치 HTML 빌더 ────────────────────────────────────────────────────────────
@@ -283,6 +352,24 @@ summary .meta{{font-weight:400;color:var(--ink2);font-size:12px;
   font-variant-numeric:tabular-nums}}
 .gen{{text-align:left;max-width:520px;white-space:pre-wrap;color:var(--ink)}}
 .exc{{color:var(--muted);font-style:italic}}
+.case{{border-top:1px solid var(--grid);padding:11px 13px}}
+.case:first-child{{border-top:none}}
+.case-hd{{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;font-size:12px;
+  color:var(--ink2);font-variant-numeric:tabular-nums;margin-bottom:8px}}
+.case-hd .sid{{font-weight:700;color:var(--ink)}} .case-hd b{{color:var(--ink)}}
+.panes{{display:grid;grid-template-columns:1fr 1fr;gap:8px}}
+@media(max-width:720px){{.panes{{grid-template-columns:1fr}}}}
+.pane{{border:1px solid var(--border);border-radius:8px;background:var(--plane);
+  padding:7px 9px;min-width:0}}
+.pane.emr{{grid-column:1/-1}}
+.pane.out{{background:var(--surface);box-shadow:inset 3px 0 0 var(--good)}}
+.pane.gt{{box-shadow:inset 3px 0 0 var(--axis)}}
+.plabel{{font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);
+  margin-bottom:4px}}
+.ptext{{font-size:12px;white-space:pre-wrap;word-break:break-word;color:var(--ink);
+  max-height:230px;overflow:auto;line-height:1.5}}
+.srcnote{{margin:2px 0 12px;padding:7px 11px;border:1px solid var(--border);border-radius:8px;
+  background:var(--surface);color:var(--ink2);font-size:12px}}
 .foot{{margin-top:26px;color:var(--muted);font-size:12px}}
 """
 
@@ -390,62 +477,120 @@ def _exclusions_table(rows, scores):
             + "".join(lines) + "</table></div>")
 
 
-def _case_toggles(split, rows, scores):
-    """변형별 <details> 토글 — 케이스별 생성문·축별 점수·게이트."""
-    if not scores:
-        return "<p class='sub'>per-case 점수 파일(scores jsonl) 없음 — 케이스 상세 생략.</p>"
+def _gate_span(gate):
+    if gate == "missed_abnormal":
+        return '<span class="g-miss">missed_abnormal</span>'
+    if gate == "degenerate":
+        return '<span class="g-deg">degenerate</span>'
+    return "—" if not gate else ihtml.escape(gate)
+
+
+def _case_table(split, recs):
+    """소스 미포함 컴팩트 표 (PHI-free 기본)."""
+    is_gold = (split == "gold")
+    head = ("<div class='wrap'><table><tr><th>sid</th><th>comp</th>"
+            + ("<th>cov</th>" if is_gold else "")
+            + "<th>faith</th><th>brev</th><th>gate</th>"
+            + ("<th class='l'>missed(gold)</th>" if is_gold else "")
+            + "<th class='l'>생성 인계문</th></tr>")
+    body = []
+    for r in recs:
+        off = r.get("official") or {}
+        sid = ihtml.escape(str(r.get("sid", "")))
+        if off.get("excluded"):
+            reason = ihtml.escape(str(off.get("exclude_reason") or "제외"))
+            cols = 6 + (2 if is_gold else 0)
+            body.append(f"<tr><td>{sid}</td><td class='l exc' colspan='{cols-1}'>"
+                        f"제외: {reason}</td></tr>")
+            continue
+        cov_c = f"<td>{_num(off.get('coverage'))}</td>" if is_gold else ""
+        missed_c = ""
+        if is_gold:
+            miss = off.get("missed") or []
+            mtxt = ihtml.escape(", ".join(str(x) for x in miss)[:200]) if miss else "—"
+            missed_c = f"<td class='l'>{mtxt}</td>"
+        gen = ihtml.escape(str(r.get("generated", "")))
+        body.append(
+            f"<tr><td>{sid}</td><td>{_num(off.get('composite'))}</td>{cov_c}"
+            f"<td>{_num(off.get('faithfulness'))}</td>"
+            f"<td>{_num(off.get('brevity'))}</td><td>{_gate_span(off.get('gate') or '')}</td>"
+            f"{missed_c}<td class='gen'>{gen or '<span class=exc>(빈 출력)</span>'}</td></tr>")
+    return head + "".join(body) + "</table></div>"
+
+
+def _case_blocks(split, recs, sources):
+    """소스 포함 블록 — 케이스마다 입력(EMR·vital)·GT·모델출력 나란히."""
     is_gold = (split == "gold")
     out = []
+    for r in recs:
+        off = r.get("official") or {}
+        sid = r.get("sid")
+        sid_s = ihtml.escape(str(sid))
+        if off.get("excluded"):
+            reason = ihtml.escape(str(off.get("exclude_reason") or "제외"))
+            out.append(f"<div class='case'><div class='case-hd'><span class='sid'>sid {sid_s}"
+                       f"</span><span class='exc'>제외: {reason}</span></div></div>")
+            continue
+        hd = [f"<span class='sid'>sid {sid_s}</span>",
+              f"<span>comp <b>{_num(off.get('composite'))}</b></span>"]
+        if is_gold:
+            hd.append(f"<span>cov {_num(off.get('coverage'))}</span>")
+        hd.append(f"<span>faith {_num(off.get('faithfulness'))}</span>")
+        hd.append(f"<span>brev {_num(off.get('brevity'))}</span>")
+        if off.get("gate"):
+            hd.append(f"<span>gate {_gate_span(off.get('gate'))}</span>")
+        src = sources.get(sid) or sources.get(int(sid) if str(sid).isdigit() else sid) or {}
+        panes = []
+        if src.get("emr"):
+            panes.append(f"<div class='pane emr'><div class='plabel'>입력 · EMR "
+                         f"(비식별)</div><div class='ptext'>{ihtml.escape(src['emr'])}</div></div>")
+        if src.get("vital"):
+            panes.append(f"<div class='pane'><div class='plabel'>입력 · Intraop Vital</div>"
+                         f"<div class='ptext'>{ihtml.escape(src['vital'])}</div></div>")
+        if src.get("gt"):
+            panes.append(f"<div class='pane gt'><div class='plabel'>정답 · 전문의 GT</div>"
+                         f"<div class='ptext'>{ihtml.escape(str(src['gt']))}</div></div>")
+        gen = ihtml.escape(str(r.get("generated", "")))
+        panes.append(f"<div class='pane out'><div class='plabel'>모델 출력</div>"
+                     f"<div class='ptext'>{gen or '<span class=exc>(빈 출력)</span>'}</div></div>")
+        out.append(f"<div class='case'><div class='case-hd'>{''.join(hd)}</div>"
+                   f"<div class='panes'>{''.join(panes)}</div></div>")
+    return "".join(out)
+
+
+def _case_toggles(split, rows, scores, sources):
+    """변형별 <details> 토글 — 케이스별 점수·게이트·(옵션)입력/GT·모델출력."""
+    if not scores:
+        return "<p class='sub'>per-case 점수 파일(scores jsonl) 없음 — 케이스 상세 생략.</p>"
+
+    def _key(r):
+        off = r.get("official") or {}
+        return (bool(off.get("excluded")), -(off.get("composite") or 0))
+
+    out = []
+    if sources:
+        note = ("입력 EMR은 <b>임상 필드만</b> 구성(병록번호·환자이름 미포함) + 라벨 식별자 스크럽한 "
+                "<b>비식별</b> 텍스트입니다. 그래도 자유텍스트 잔여 위험이 있으니 <b>외부 공유·커밋 금지</b>. "
+                + ("전문의 GT(사람 gold) 병기." if split == "gold"
+                   else "dev split은 전문의 GT가 없어 입력·출력만 표시."))
+        out.append(f"<div class='srcnote'>⚠ {note}</div>")
     for tag, s in sorted(rows.items(), key=lambda kv: (kv[1]["model"],
                                                        -(kv[1]["composite"]["mean"] or 0))):
         recs = scores.get(tag, [])
         if not recs:
             continue
-        head = ("<div class='wrap'><table><tr><th>sid</th><th>comp</th>"
-                + ("<th>cov</th>" if is_gold else "")
-                + "<th>faith</th><th>brev</th><th>gate</th>"
-                + ("<th class='l'>missed(gold)</th>" if is_gold else "")
-                + "<th class='l'>생성 인계문</th></tr>")
-        body = []
-        # 유효 먼저, composite 내림차순; 제외는 뒤로
-        def _key(r):
-            off = r.get("official") or {}
-            exc = bool(off.get("excluded"))
-            return (exc, -(off.get("composite") or 0))
-        for r in sorted(recs, key=_key):
-            off = r.get("official") or {}
-            sid = ihtml.escape(str(r.get("sid", "")))
-            gen = ihtml.escape(str(r.get("generated", "")))
-            if off.get("excluded"):
-                reason = ihtml.escape(str(off.get("exclude_reason") or "제외"))
-                cols = 6 + (2 if is_gold else 0)
-                body.append(f"<tr><td>{sid}</td><td class='l exc' colspan='{cols-1}'>"
-                            f"제외: {reason}</td></tr>")
-                continue
-            gate = off.get("gate") or ""
-            gate_s = (f'<span class="g-miss">{gate}</span>' if gate == "missed_abnormal"
-                      else f'<span class="g-deg">{gate}</span>' if gate == "degenerate"
-                      else "—" if not gate else ihtml.escape(gate))
-            cov_c = f"<td>{_num(off.get('coverage'))}</td>" if is_gold else ""
-            missed_c = ""
-            if is_gold:
-                miss = off.get("missed") or []
-                mtxt = ihtml.escape(", ".join(str(x) for x in miss)[:200]) if miss else "—"
-                missed_c = f"<td class='l'>{mtxt}</td>"
-            body.append(
-                f"<tr><td>{sid}</td><td>{_num(off.get('composite'))}</td>{cov_c}"
-                f"<td>{_num(off.get('faithfulness'))}</td>"
-                f"<td>{_num(off.get('brevity'))}</td><td>{gate_s}</td>{missed_c}"
-                f"<td class='gen'>{gen or '<span class=exc>(빈 출력)</span>'}</td></tr>")
-        table = head + "".join(body) + "</table></div>"
+        recs = sorted(recs, key=_key)
+        inner = _case_blocks(split, recs, sources) if sources \
+            else _case_table(split, recs)
         meta = (f"composite {_num(s['composite']['mean'])} · "
                 f"유효 {s['n_valid']}/{s['n_valid']+s['n_excluded']}")
         out.append(f"<details><summary><span>{ihtml.escape(tag)}</span>"
-                   f"<span class='meta'>{meta}</span></summary>{table}</details>")
+                   f"<span class='meta'>{meta}</span></summary>{inner}</details>")
     return "".join(out)
 
 
-def _build_html(split, rows, pw, scores, rev):
+def _build_html(split, rows, pw, scores, rev, sources=None):
+    sources = sources or {}
     models = sorted({s["model"] for s in rows.values()})
     model_colors = _model_colors(models)
     cards = "".join(
@@ -473,21 +618,27 @@ def _build_html(split, rows, pw, scores, rev):
         "<h2>제외 · 안전게이트 상세</h2>"
         f"{_exclusions_table(rows, scores)}"
         "<h2>케이스별 예시 출력 (변형 클릭해 펼치기)</h2>"
-        f"{_case_toggles(split, rows, scores)}"
+        f"{_case_toggles(split, rows, scores, sources)}"
         "<p class='foot'>composite = 0.5·coverage + 0.3·faithfulness + 0.2·brevity "
-        "(dev는 coverage 미측정→faith/brev 재정규화). EMR 원문은 PHI 최소화로 미포함.</p>")
+        "(dev는 coverage 미측정→faith/brev 재정규화). "
+        + ("입력 EMR·GT는 비식별 처리(병록번호·이름 제외) — 외부 공유 금지."
+           if sources else "EMR 원문은 PHI 최소화로 미포함(--include_source로 비식별 EMR/GT 표시).")
+        + "</p>")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--split", choices=["gold", "dev"], default="dev")
+    ap.add_argument("--include_source", action="store_true",
+                    help="케이스 토글에 비식별 EMR·GT 병기(별도 파일 *_source.html). "
+                         "기본 off — 자동 리포트는 PHI-free 유지.")
     args = ap.parse_args()
     rows, scores = _load(args.split)
     if not rows:
         print(f"[report_v3] {args.split} 평가 요약 없음 — evaluate 먼저 실행")
         return
     pw = pairwise_vs_raw(rows, scores)
-    write_outputs(args.split, rows, pw, scores)
+    write_outputs(args.split, rows, pw, scores, include_source=args.include_source)
 
 
 if __name__ == "__main__":
