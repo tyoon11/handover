@@ -1,5 +1,5 @@
 """
-report_v3.py — 결과 요약 (통계 포함) + HTML 리포트
+report_v3.py — 결과 요약 (통계 포함) + 리치 HTML 리포트
 
 E8 반영:
   - 변형별 3축 평균 + bootstrap 95% CI
@@ -7,15 +7,58 @@ E8 반영:
   - macro/micro coverage 병기, 제외 케이스(judge 실패/no_gold) 별도 표
   - gold checklist 검수 상태('전문의 검수 n / 잠정채택 n / 잠정 n') 명시 (E6)
 
+HTML 리포트(자체완결·외부의존 없음, 라이트/다크 대응):
+  1) 지표 설명 카드   2) 시각 대시보드(모델색·composite 막대+CI)
+  3) 요약표          4) 제외/안전게이트 상세표
+  5) 케이스별 예시 출력 토글(<details>) — 모델 생성문·축별 점수·게이트
+
 출력: {OUTPUT_BASE}/report/results_{split}_v3.{csv,md,html}
-※ HTML에는 EMR 원문 미포함 (PHI 최소화) — 모델 출력·checklist 항목만.
+※ HTML에는 EMR 원문 미포함 (PHI 최소화) — 모델 출력·checklist 항목·점수만.
 """
 
 import argparse
+import html as ihtml
 import json
 
 from .config_v3 import EVAL_OUT, REPORT_OUT, RUN_ID, STATS, ensure_dir
 from .eval_v3.stats import holm_correction, paired_tests
+
+# 모델 식별 색(카테고리) — dataviz 검증 팔레트 slot 1..8 (라이트/다크). 순환 금지.
+_SERIES_LIGHT = ["#2a78d6", "#1baf7a", "#eda100", "#008300",
+                 "#4a3aa7", "#e34948", "#e87ba4", "#eb6834"]
+_SERIES_DARK = ["#3987e5", "#199e70", "#c98500", "#008300",
+                "#9085e9", "#e66767", "#d55181", "#d95926"]
+
+# 지표 설명 (제목, 본문) — 리포트 상단 카드
+_METRIC_DOCS = [
+    ("composite (종합)",
+     "0.5·coverage + 0.3·faithfulness + 0.2·brevity 의 가중합. "
+     "dev split은 케이스별 전문의 checklist가 없어 <b>coverage를 측정하지 않으며</b>, "
+     "faithfulness·brevity를 0.6/0.4로 재정규화해 산출한다. "
+     "coverage를 포함한 완전한 3축 종합은 <b>gold split(--final)</b>에서만 나온다."),
+    ("coverage (충실성·gold 전용)",
+     "전문의 gold checklist 대비 recall. <b>macro</b>=케이스별 recall 평균, "
+     "<b>micro</b>=전체 항목 pooled recall. dev에선 '—'."),
+    ("faithfulness (사실성)",
+     "생성문의 각 claim이 EMR·바이탈에 의해 뒷받침되는 비율(entailment). "
+     "환각·근거 없는 서술은 감점. 프롬프트 주입 방어 구분자 사용."),
+    ("brevity (간결성)",
+     "과설명·행정 노이즈에 대한 감점. 임상적으로 필요한 정보를 담되 짧고 "
+     "정보밀도가 높을수록 높다."),
+    ("안전게이트",
+     "<b>missed_abnormal</b>: 이상소견이 있는데 '특이사항 없음'류로 뭉갠 경우 → composite 0 강제. "
+     "<b>degenerate</b>: 빈·조각 출력. 둘 다 임상 안전 실패로 별도 집계."),
+    ("제외 (n 유효/제외)",
+     "judge 실패 또는 gold 부재 케이스는 <b>점수가 아니라 인프라 문제</b>로 따로 센다. "
+     "유효비율이 80% 미만이면 해당 변형의 평가는 신뢰 불가로 본다."),
+    ("CI · vs raw · 유의성(✓)",
+     "CI = bootstrap 95% 신뢰구간. vs raw = 같은 모델의 {model}_raw 대비 "
+     "<b>공통 유효 케이스</b> paired permutation test, Holm 다중비교 보정. "
+     "✓ = 보정 후에도 유의(α=" + str(STATS.get("alpha", 0.05)) + ")."),
+    ("judge (교차·순환 방지)",
+     "평가 judge는 gemma4_31b + qwen35 교차 채점. 대상 모델과 <b>같은 family의 judge는 "
+     "채점에서 제외</b>(자기채점 순환 방지). 선호쌍 생성 judge(prometheus)와도 분리."),
+]
 
 
 def _load(split: str):
@@ -87,7 +130,18 @@ def _fmt_ci(x):
     return f"{x['mean']:.3f} [{x['lo']:.3f},{x['hi']:.3f}]"
 
 
-def write_outputs(split, rows, pw):
+def _num(v, nd=3):
+    """None/숫자 → 표시 문자열."""
+    if v is None:
+        return "—"
+    try:
+        return f"{float(v):.{nd}f}"
+    except (TypeError, ValueError):
+        return ihtml.escape(str(v))
+
+
+def write_outputs(split, rows, pw, scores=None):
+    scores = scores or {}
     out_dir = ensure_dir(REPORT_OUT)
     # CSV
     import csv
@@ -143,36 +197,285 @@ def write_outputs(split, rows, pw):
               "- vs raw: 공통 유효 케이스 paired permutation test, Holm 보정\n")
     (out_dir / f"results_{split}_v3.md").write_text("".join(md), encoding="utf-8")
 
-    # HTML (간이 — PHI 없는 요약만)
-    html = ["<meta charset='utf-8'><title>v3 results</title>",
-            "<style>body{font-family:sans-serif;max-width:1100px;margin:2em auto}"
-            "table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccc;"
-            "padding:4px 8px;font-size:13px}th{background:#f0f0f0}</style>",
-            f"<h1>v3 결과 — split={split} (run {RUN_ID})</h1>"]
-    if rev:
-        html.append(f"<p><b>gold checklist</b>: 전문의검수 {rev['reviewed']} / "
-                    f"잠정채택 {rev['accepted_without_review']} / 잠정 {rev['provisional']}"
-                    "</p>")
-    html.append("<table><tr><th>tag</th><th>n(유효/제외)</th><th>composite [CI]</th>"
-                "<th>coverage</th><th>micro</th><th>faith</th><th>brev</th>"
-                "<th>누락게이트</th><th>붕괴</th><th>vs raw (Holm)</th></tr>")
+    # HTML (리치 — 대시보드 + 케이스 토글, PHI 없는 항목만)
+    html = _build_html(split, rows, pw, scores, rev)
+    (out_dir / f"results_{split}_v3.html").write_text(html, encoding="utf-8")
+
+    print(f"[report_v3] 저장: {out_dir}/results_{split}_v3.(csv|md|html)")
+
+
+# ── 리치 HTML 빌더 ────────────────────────────────────────────────────────────
+def _model_colors(models):
+    """{model: (light_hex, dark_hex)} — 정렬 순서로 slot 배정(순환 금지, 8개 초과는 회색)."""
+    out = {}
+    for i, m in enumerate(models):
+        if i < len(_SERIES_LIGHT):
+            out[m] = (_SERIES_LIGHT[i], _SERIES_DARK[i])
+        else:
+            out[m] = ("#898781", "#898781")   # slot 소진 → 무채색(식별은 라벨로)
+    return out
+
+
+def _css(model_colors):
+    per_model = "\n".join(
+        f".m-{m}{{--c:{lt}}}" for m, (lt, dk) in model_colors.items())
+    per_model_dark = "\n".join(
+        f".m-{m}{{--c:{dk}}}" for m, (lt, dk) in model_colors.items())
+    return f"""
+:root{{
+  --surface:#fcfcfb; --plane:#f9f9f7; --ink:#0b0b0b; --ink2:#52514e;
+  --muted:#898781; --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,.10);
+  --track:#eeede9; --good:#006300; --warn:#b26a00; --crit:#c0362f;
+}}
+@media (prefers-color-scheme:dark){{
+  :root{{
+    --surface:#1a1a19; --plane:#0d0d0d; --ink:#fff; --ink2:#c3c2b7;
+    --muted:#898781; --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,.10);
+    --track:#2c2c2a; --good:#0ca30c; --warn:#fab219; --crit:#e66767;
+  }}
+{per_model_dark}
+}}
+{per_model}
+*{{box-sizing:border-box}}
+body{{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink);
+  background:var(--plane);max-width:1160px;margin:0 auto;padding:24px 20px 80px;
+  line-height:1.5;font-size:14px}}
+h1{{font-size:22px;margin:0 0 2px}} h2{{font-size:17px;margin:34px 0 12px;
+  padding-bottom:6px;border-bottom:1px solid var(--grid)}}
+.sub{{color:var(--ink2);font-size:13px;margin:0 0 4px}}
+.chk{{display:inline-block;margin-top:8px;padding:6px 10px;border:1px solid var(--border);
+  border-radius:8px;background:var(--surface);font-size:12.5px;color:var(--ink2)}}
+.cards{{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px}}
+.card{{border:1px solid var(--border);border-radius:10px;background:var(--surface);
+  padding:11px 13px}}
+.card h3{{font-size:13px;margin:0 0 4px}} .card p{{margin:0;font-size:12.5px;color:var(--ink2)}}
+.legend{{display:flex;gap:16px;flex-wrap:wrap;margin:2px 0 14px;font-size:12.5px;color:var(--ink2)}}
+.legend span{{display:inline-flex;align-items:center;gap:6px}}
+.sw{{width:11px;height:11px;border-radius:3px;display:inline-block}}
+.mgroup{{font-size:12.5px;color:var(--muted);margin:14px 0 4px;font-weight:600}}
+.bar-row{{display:flex;align-items:center;gap:10px;margin:3px 0}}
+.bar-label{{flex:0 0 168px;font-size:12px;text-align:right;color:var(--ink2);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.bar-track{{position:relative;flex:1 1 auto;height:18px;background:var(--track);
+  border-radius:4px}}
+.bar-ci{{position:absolute;top:6px;height:6px;background:var(--border);border-radius:3px}}
+.bar-fill{{position:absolute;top:0;left:0;height:18px;border-radius:4px;background:var(--c)}}
+.bar-val{{flex:0 0 118px;font-size:12px;font-variant-numeric:tabular-nums;color:var(--ink)}}
+.bar-val .sig{{color:var(--good);font-weight:700}}
+.bar-val .dn{{color:var(--crit)}}
+table{{border-collapse:collapse;width:100%;font-size:12.5px;background:var(--surface)}}
+.wrap{{overflow-x:auto}}
+td,th{{border:1px solid var(--grid);padding:5px 8px;text-align:right}}
+th{{background:var(--track);color:var(--ink2);font-weight:600;position:sticky;top:0}}
+td.l,th.l{{text-align:left}} td{{font-variant-numeric:tabular-nums}}
+tr:hover td{{background:rgba(127,127,127,.06)}}
+.pill{{padding:1px 7px;border-radius:20px;font-size:11px;font-weight:600}}
+.pill.ok{{color:var(--good);border:1px solid var(--good)}}
+.pill.no{{color:var(--muted);border:1px solid var(--axis)}}
+.g-miss{{color:var(--crit);font-weight:600}} .g-deg{{color:var(--warn);font-weight:600}}
+details{{border:1px solid var(--border);border-radius:10px;background:var(--surface);
+  margin:8px 0;overflow:hidden}}
+details>summary{{cursor:pointer;padding:10px 13px;font-size:13px;font-weight:600;
+  list-style:none;display:flex;justify-content:space-between;gap:12px;align-items:center}}
+details>summary::-webkit-details-marker{{display:none}}
+details>summary:hover{{background:rgba(127,127,127,.06)}}
+summary .meta{{font-weight:400;color:var(--ink2);font-size:12px;
+  font-variant-numeric:tabular-nums}}
+.gen{{text-align:left;max-width:520px;white-space:pre-wrap;color:var(--ink)}}
+.exc{{color:var(--muted);font-style:italic}}
+.foot{{margin-top:26px;color:var(--muted);font-size:12px}}
+"""
+
+
+def _dashboard(rows, pw, model_colors):
+    """모델별 그룹, composite 내림차순 수평막대(+CI whisker, 직접라벨)."""
+    out = ['<div class="legend">']
+    for m, (lt, _dk) in model_colors.items():
+        out.append(f'<span><span class="sw m-{m}" style="background:var(--c)"></span>{ihtml.escape(m)}</span>')
+    out.append('</div>')
+    by_model = {}
+    for tag, s in rows.items():
+        by_model.setdefault(s["model"], []).append((tag, s))
+    for m in sorted(by_model):
+        out.append(f'<div class="mgroup">{ihtml.escape(m)}</div>')
+        grp = sorted(by_model[m], key=lambda kv: -(kv[1]["composite"]["mean"] or 0))
+        for tag, s in grp:
+            c = s["composite"]
+            mean = c.get("mean") or 0
+            lo, hi = c.get("lo"), c.get("hi")
+            d = pw.get(m, {}).get(tag, {})
+            holm = d.get("holm") or {}
+            diff = d.get("mean_diff")
+            sig = holm.get("significant")
+            ci = ""
+            if lo is not None and hi is not None:
+                ci = (f'<div class="bar-ci" style="left:{lo*100:.1f}%;'
+                      f'width:{max(0,(hi-lo))*100:.1f}%"></div>')
+            vs = ""
+            if diff is not None:
+                cls = "sig" if sig else ("dn" if diff < 0 else "")
+                mark = " ✓" if sig else ""
+                vs = f' <span class="{cls}">({diff:+.3f}{mark})</span>'
+            title = f"{tag}: composite {mean:.3f}"
+            if lo is not None:
+                title += f"  CI[{lo:.3f}, {hi:.3f}]"
+            out.append(
+                f'<div class="bar-row"><div class="bar-label" title="{ihtml.escape(tag)}">'
+                f'{ihtml.escape(tag)}</div>'
+                f'<div class="bar-track m-{m}" title="{ihtml.escape(title)}">{ci}'
+                f'<div class="bar-fill" style="width:{mean*100:.1f}%"></div></div>'
+                f'<div class="bar-val">{mean:.3f}{vs}</div></div>')
+    return "".join(out)
+
+
+def _summary_table(rows, pw):
+    head = ("<div class='wrap'><table><tr>"
+            "<th class='l'>tag</th><th>n(유효/제외)</th><th>composite [95% CI]</th>"
+            "<th>coverage</th><th>micro</th><th>faith</th><th>brev</th>"
+            "<th>누락게이트</th><th>붕괴</th><th>judge ρ</th><th>vs raw (Holm)</th></tr>")
+    body = []
     for tag, s in sorted(rows.items(), key=lambda kv: (kv[1]["model"],
                                                        -(kv[1]["composite"]["mean"] or 0))):
         d = pw.get(s["model"], {}).get(tag, {})
         holm = d.get("holm") or {}
-        vs = (f"{d.get('mean_diff'):+0.3f} (p={holm.get('p_adj')})"
-              + ("✓" if holm.get("significant") else "")
-              if d.get("mean_diff") is not None else "-")
-        html.append(
-            f"<tr><td>{tag}</td><td>{s['n_valid']}/{s['n_excluded']}</td>"
-            f"<td>{_fmt_ci(s['composite'])}</td><td>{s['coverage']['mean']}</td>"
-            f"<td>{s['micro']['micro_coverage']}</td><td>{s['faithfulness']['mean']}</td>"
-            f"<td>{s['brevity']['mean']}</td><td>{s['gates']['missed_abnormal']}</td>"
-            f"<td>{s['gates']['degenerate']}</td><td>{vs}</td></tr>")
-    html.append("</table>")
-    (out_dir / f"results_{split}_v3.html").write_text("".join(html), encoding="utf-8")
+        diff = d.get("mean_diff")
+        if diff is None:
+            vs = "—"
+        else:
+            mark = ' <span class="pill ok">✓</span>' if holm.get("significant") else ""
+            vs = f"{diff:+.3f} (p={_num(holm.get('p_adj'))}){mark}"
+        gm = s["gates"]["missed_abnormal"]
+        gd = s["gates"]["degenerate"]
+        gm_s = f'<span class="g-miss">{gm}</span>' if gm else "0"
+        gd_s = f'<span class="g-deg">{gd}</span>' if gd else "0"
+        rho = (s.get("judge_agreement") or {}).get("spearman")
+        body.append(
+            f"<tr><td class='l'>{ihtml.escape(tag)}</td>"
+            f"<td>{s['n_valid']}/{s['n_excluded']}</td>"
+            f"<td>{_fmt_ci(s['composite'])}</td>"
+            f"<td>{_num(s['coverage']['mean'])}</td>"
+            f"<td>{_num(s['micro']['micro_coverage'])}</td>"
+            f"<td>{_num(s['faithfulness']['mean'])}</td>"
+            f"<td>{_num(s['brevity']['mean'])}</td>"
+            f"<td>{gm_s}</td><td>{gd_s}</td><td>{_num(rho)}</td>"
+            f"<td class='l'>{vs}</td></tr>")
+    return head + "".join(body) + "</table></div>"
 
-    print(f"[report_v3] 저장: {out_dir}/results_{split}_v3.(csv|md|html)")
+
+def _exclusions_table(rows, scores):
+    """제외 사유·안전게이트가 있는 변형만 상세 집계."""
+    lines = []
+    for tag in sorted(rows):
+        s = rows[tag]
+        recs = scores.get(tag, [])
+        reasons = {}
+        for r in recs:
+            off = r.get("official") or {}
+            if off.get("excluded"):
+                reasons[off.get("exclude_reason") or "?"] = \
+                    reasons.get(off.get("exclude_reason") or "?", 0) + 1
+        gm, gd = s["gates"]["missed_abnormal"], s["gates"]["degenerate"]
+        if not reasons and not gm and not gd and not s["n_excluded"]:
+            continue
+        rs = ", ".join(f"{ihtml.escape(str(k))}×{v}" for k, v in reasons.items()) or "—"
+        lines.append(
+            f"<tr><td class='l'>{ihtml.escape(tag)}</td><td>{s['n_excluded']}</td>"
+            f"<td class='l'>{rs}</td>"
+            f"<td>{('<span class=g-miss>'+str(gm)+'</span>') if gm else 0}</td>"
+            f"<td>{('<span class=g-deg>'+str(gd)+'</span>') if gd else 0}</td></tr>")
+    if not lines:
+        return "<p class='sub'>제외·안전게이트 발동 케이스 없음 (모든 변형 전건 유효).</p>"
+    return ("<div class='wrap'><table><tr><th class='l'>tag</th><th>제외 n</th>"
+            "<th class='l'>제외 사유</th><th>누락게이트</th><th>붕괴</th></tr>"
+            + "".join(lines) + "</table></div>")
+
+
+def _case_toggles(split, rows, scores):
+    """변형별 <details> 토글 — 케이스별 생성문·축별 점수·게이트."""
+    if not scores:
+        return "<p class='sub'>per-case 점수 파일(scores jsonl) 없음 — 케이스 상세 생략.</p>"
+    is_gold = (split == "gold")
+    out = []
+    for tag, s in sorted(rows.items(), key=lambda kv: (kv[1]["model"],
+                                                       -(kv[1]["composite"]["mean"] or 0))):
+        recs = scores.get(tag, [])
+        if not recs:
+            continue
+        head = ("<div class='wrap'><table><tr><th>sid</th><th>comp</th>"
+                + ("<th>cov</th>" if is_gold else "")
+                + "<th>faith</th><th>brev</th><th>gate</th>"
+                + ("<th class='l'>missed(gold)</th>" if is_gold else "")
+                + "<th class='l'>생성 인계문</th></tr>")
+        body = []
+        # 유효 먼저, composite 내림차순; 제외는 뒤로
+        def _key(r):
+            off = r.get("official") or {}
+            exc = bool(off.get("excluded"))
+            return (exc, -(off.get("composite") or 0))
+        for r in sorted(recs, key=_key):
+            off = r.get("official") or {}
+            sid = ihtml.escape(str(r.get("sid", "")))
+            gen = ihtml.escape(str(r.get("generated", "")))
+            if off.get("excluded"):
+                reason = ihtml.escape(str(off.get("exclude_reason") or "제외"))
+                cols = 6 + (2 if is_gold else 0)
+                body.append(f"<tr><td>{sid}</td><td class='l exc' colspan='{cols-1}'>"
+                            f"제외: {reason}</td></tr>")
+                continue
+            gate = off.get("gate") or ""
+            gate_s = (f'<span class="g-miss">{gate}</span>' if gate == "missed_abnormal"
+                      else f'<span class="g-deg">{gate}</span>' if gate == "degenerate"
+                      else "—" if not gate else ihtml.escape(gate))
+            cov_c = f"<td>{_num(off.get('coverage'))}</td>" if is_gold else ""
+            missed_c = ""
+            if is_gold:
+                miss = off.get("missed") or []
+                mtxt = ihtml.escape(", ".join(str(x) for x in miss)[:200]) if miss else "—"
+                missed_c = f"<td class='l'>{mtxt}</td>"
+            body.append(
+                f"<tr><td>{sid}</td><td>{_num(off.get('composite'))}</td>{cov_c}"
+                f"<td>{_num(off.get('faithfulness'))}</td>"
+                f"<td>{_num(off.get('brevity'))}</td><td>{gate_s}</td>{missed_c}"
+                f"<td class='gen'>{gen or '<span class=exc>(빈 출력)</span>'}</td></tr>")
+        table = head + "".join(body) + "</table></div>"
+        meta = (f"composite {_num(s['composite']['mean'])} · "
+                f"유효 {s['n_valid']}/{s['n_valid']+s['n_excluded']}")
+        out.append(f"<details><summary><span>{ihtml.escape(tag)}</span>"
+                   f"<span class='meta'>{meta}</span></summary>{table}</details>")
+    return "".join(out)
+
+
+def _build_html(split, rows, pw, scores, rev):
+    models = sorted({s["model"] for s in rows.values()})
+    model_colors = _model_colors(models)
+    cards = "".join(
+        f"<div class='card'><h3>{ihtml.escape(t)}</h3><p>{b}</p></div>"
+        for t, b in _METRIC_DOCS)
+    chk = ""
+    if rev:
+        chk = (f"<div class='chk'><b>gold checklist</b> — 전문의검수 {rev['reviewed']} / "
+               f"잠정채택 {rev['accepted_without_review']} / 잠정 {rev['provisional']} "
+               f"(검수 0이면 결과는 잠정치)</div>")
+    return (
+        "<meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>v3 결과 — {ihtml.escape(split)} ({ihtml.escape(RUN_ID)})</title>"
+        f"<style>{_css(model_colors)}</style>"
+        f"<h1>v3 결과 — split={ihtml.escape(split)}</h1>"
+        f"<p class='sub'>run_id <b>{ihtml.escape(RUN_ID)}</b> · 변형 {len(rows)}종 · "
+        f"모델 {', '.join(ihtml.escape(m) for m in models)}</p>{chk}"
+        "<h2>지표 설명</h2>"
+        f"<div class='cards'>{cards}</div>"
+        "<h2>대시보드 — composite (막대) + 95% CI (whisker), 모델색</h2>"
+        f"{_dashboard(rows, pw, model_colors)}"
+        "<h2>요약표</h2>"
+        f"{_summary_table(rows, pw)}"
+        "<h2>제외 · 안전게이트 상세</h2>"
+        f"{_exclusions_table(rows, scores)}"
+        "<h2>케이스별 예시 출력 (변형 클릭해 펼치기)</h2>"
+        f"{_case_toggles(split, rows, scores)}"
+        "<p class='foot'>composite = 0.5·coverage + 0.3·faithfulness + 0.2·brevity "
+        "(dev는 coverage 미측정→faith/brev 재정규화). EMR 원문은 PHI 최소화로 미포함.</p>")
 
 
 def main():
@@ -184,7 +487,7 @@ def main():
         print(f"[report_v3] {args.split} 평가 요약 없음 — evaluate 먼저 실행")
         return
     pw = pairwise_vs_raw(rows, scores)
-    write_outputs(args.split, rows, pw)
+    write_outputs(args.split, rows, pw, scores)
 
 
 if __name__ == "__main__":
