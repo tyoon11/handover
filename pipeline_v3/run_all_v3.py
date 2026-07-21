@@ -53,7 +53,7 @@ print(f"[RUN v3] HANDOVER_RUN_ID={_RID}")
 from .config_v3 import (       # noqa: E402
     EVAL_OUT, GEMMA4_BASES, GOLD_CHECKLIST_JSON, INFER_OUT, OUTPUT_BASE, PAIRS_OUT,
     PAIRS_SFT_PKL, PROVENANCE_JSON, RLAIF_OUT, SFT_OUT, TRAIN_KEYS, ensure_dir,
-    model_path,
+    infer_engine_for, model_path,
 )
 from .provenance import (      # noqa: E402
     ckpt_valid, dir_hash, jsonl_rows, read_done_marker, stage_done,
@@ -249,15 +249,22 @@ def ensure_rlaif(model, exp_key, loss, gpus, skip_done) -> bool:
 
 def ensure_infer(model, exp_key, split, gpus, skip_done, allow_gold=False) -> bool:
     out_file = _infer_file(model, exp_key, split)
+    engine = infer_engine_for(model)     # vLLM 불가 모델은 'hf' 강제 (엔진 혼용 방지)
     marker = read_done_marker(out_file.parent)
     if skip_done and marker and marker.get("split") == split and \
             jsonl_rows(out_file) > 0:
+        # 엔진 강제 대상인데 기존 산출물이 다른 엔진이면 재실행 (변형 간 엔진 통일)
+        engine_ok = (engine == "auto") or (marker.get("engine") == engine)
         # 체크포인트가 그 후 갱신됐으면 재실행 (B3)
         ck = _ckpt(model, exp_key)
-        if exp_key == "raw" or marker.get("ckpt_hash") == dir_hash(Path(ck)):
+        if engine_ok and (exp_key == "raw" or marker.get("ckpt_hash") == dir_hash(Path(ck))):
             log(f"  [SKIP] {model}/{exp_key} infer({split})")
             return True
-        log(f"  [재실행] {model}/{exp_key}: 체크포인트 갱신 감지")
+        if not engine_ok:
+            log(f"  [재실행] {model}/{exp_key}: 엔진 불일치 "
+                f"(기존 {marker.get('engine')} → {engine} 강제)")
+        else:
+            log(f"  [재실행] {model}/{exp_key}: 체크포인트 갱신 감지")
     ck = _ckpt(model, exp_key)
     if exp_key != "raw" and not ckpt_valid(Path(ck)):
         log(f"  [실패] {model}/{exp_key}: 추론용 체크포인트 없음 {ck}")
@@ -268,6 +275,8 @@ def ensure_infer(model, exp_key, split, gpus, skip_done, allow_gold=False) -> bo
         cmd += ["--base", model]
     if split == "gold" and allow_gold:
         cmd += ["--allow_gold"]
+    if engine != "auto":
+        cmd += ["--engine", engine]
     return run_cmd(cmd, f"Inference({split})", gpus, f"{model}/{exp_key}")
 
 

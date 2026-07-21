@@ -110,6 +110,23 @@ MODELS = {
 # gemma-4 계열: LoRA 타깃/attn 구현 특수처리 필요
 GEMMA4_BASES = {k for k, v in MODELS.items() if v["family"] == "gemma" and k != "medgemma27b"}
 
+# vLLM 로드 불가 모델 → 추론 시 HF 강제 (변형 간 엔진 혼용 방지).
+#   근본 원인(공통): 멀티모달/하이브리드 base에 텍스트 LoRA를 merge하면 텍스트 전용
+#   체크포인트가 나오는데, vLLM이 그 arch를 '멀티모달'로 로드하려다 실패한다.
+#     - qwen35(Qwen3.5): merged config 가 Qwen3_5TextConfig → vLLM(qwen3_5)이 기대하는
+#       Qwen3_5Config 와 타입 불일치 → TypeError.
+#     - gemma4(Gemma4): vLLM 이 Gemma4ForConditionalGeneration 로 로드하려다 merged 에 없는
+#       preprocessor_config.json(비전 프로세서) 을 찾아 실패.
+#   두 경우 모두 raw만 vLLM 통과 → raw=vllm / 학습변형=hf 로 섞이면 vs-raw 비교가
+#   '학습 효과'가 아니라 '디코딩 엔진 차이'에 오염된다. → 전 변형을 HF로 통일한다.
+#   (llama 등 순수 텍스트 base는 merged 도 vLLM 정상 — 목록에서 제외.)
+VLLM_INCOMPATIBLE_MODELS = {"qwen35", "gemma4"}
+
+
+def infer_engine_for(model_key: str) -> str:
+    """추론 엔진 선택: vLLM 불가 모델은 'hf' 강제, 그 외 'auto'(vLLM 우선)."""
+    return "hf" if model_key in VLLM_INCOMPATIBLE_MODELS else "auto"
+
 
 def model_path(key: str) -> Path:
     return MODEL_BASE / MODELS[key]["dir"]
