@@ -30,10 +30,11 @@ reinfer_darin_on_v3sids.py — 다린 체크포인트를 v3 sid(gold/dev)에 재
 
 사용 (v3 repo 루트에서 실행 — pipeline_v3 import 되는 곳)
   # GPU 2장 병렬 (모델 단위로 분배 — 각 8B라 1장당 1모델)
+  # base 모델은 local_models 하위에서 로드(Llama-3.1-8B-Instruct/, Qwen3-8B/).
+  # --local_models 미지정 시 config MODEL_BASE(=HANDOVER_MODEL_DIR) 사용.
   python reinfer_darin_on_v3sids.py --split gold --gpus 6,7 \
       --experiments_root ~/workspace/data/HANDOVER_인계용_다린/experiments \
       --out_root         ~/workspace/data/HANDOVER_인계용_다린/data/inferenced_v3sids \
-      --cache_dir        /home/coder/workspace/data/share/_hf_models/ \
       --skip_done
   # 단일 GPU
   CUDA_VISIBLE_DEVICES=6 python reinfer_darin_on_v3sids.py --split gold \
@@ -44,6 +45,7 @@ import os
 import subprocess
 import sys
 from copy import deepcopy
+from pathlib import Path
 
 # 폐쇄망: HF 허브 온라인 조회 차단 → 로컬 캐시만 사용 (transformers import 전에 설정해야 함).
 # 외부에서 export 로 0을 주면 존중(온라인 환경 호환).
@@ -60,6 +62,10 @@ from peft import PeftModel
 
 from pipeline_v3.data_splits import load_splits
 from pipeline_v3.prompt_utils import get_sid
+from pipeline_v3.config_v3 import MODEL_BASE  # 로컬 base 모델 루트(local_models)
+
+# 다린 base → local_models 하위 디렉토리명 (config_v3.MODELS 와 동일)
+BASE_DIR = {"llama": "Llama-3.1-8B-Instruct", "qwen": "Qwen3-8B"}
 
 # 다린 model_L (evaluation.ipynb cell 47과 동일). (setting, model_type, is_raw)
 MODEL_L = [
@@ -152,14 +158,14 @@ def out_path(out_root, setting_type, model_type, is_raw):
     return os.path.join(out_root, setting_type, f"{model_type}.pkl")
 
 
-def load_model(setting_type, model_type, is_raw, experiments_root, cache_dir, max_gb):
-    base = ("meta-llama/Meta-Llama-3.1-8B-Instruct" if "llama" in model_type
-            else "Qwen/Qwen3-8B")
+def load_model(setting_type, model_type, is_raw, experiments_root, models_root, max_gb):
+    key = "llama" if "llama" in model_type else "qwen"
+    base = str(models_root / BASE_DIR[key])   # local_models 하위 로컬 경로
     print(f"  base={base}  raw={is_raw}")
     model = AutoModelForCausalLM.from_pretrained(
         base, torch_dtype=torch.bfloat16, device_map="auto",
         max_memory=({0: f"{max_gb}GB"} if max_gb else None),
-        cache_dir=cache_dir or None, local_files_only=True)
+        local_files_only=True)
     if not is_raw:
         peft_dir = os.path.join(experiments_root, setting_type, model_type)
         print(f"  adapter={peft_dir}")
@@ -167,8 +173,7 @@ def load_model(setting_type, model_type, is_raw, experiments_root, cache_dir, ma
         tok = AutoTokenizer.from_pretrained(peft_dir, use_fast=True,
                                             local_files_only=True)
     else:
-        tok = AutoTokenizer.from_pretrained(base, use_fast=True, cache_dir=cache_dir or None,
-                                            local_files_only=True)
+        tok = AutoTokenizer.from_pretrained(base, use_fast=True, local_files_only=True)
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
     tok.truncation_side = "left"
@@ -199,8 +204,8 @@ def launch_parallel(args, gpus):
             "--split", args.split,
             "--experiments_root", args.experiments_root,
             "--out_root", args.out_root]
-    if args.cache_dir:
-        base += ["--cache_dir", args.cache_dir]
+    if args.local_models:
+        base += ["--local_models", args.local_models]
     if args.max_gb:
         base += ["--max_gb", str(args.max_gb)]
     if args.skip_raw:
@@ -248,8 +253,9 @@ def run_inference(args):
             print(f"{tag}[skip_done] {op}")
             continue
         print(f"\n{tag}=== {setting_type}/{model_type} (raw={is_raw}) ===")
+        models_root = Path(args.local_models) if args.local_models else MODEL_BASE
         model, tok = load_model(setting_type, model_type, is_raw,
-                                args.experiments_root, args.cache_dir, args.max_gb)
+                                args.experiments_root, models_root, args.max_gb)
         frames = [generate_for_df(model, tok, df, model_type) for df in targets.values()]
         os.makedirs(os.path.dirname(op), exist_ok=True)
         pd.concat(frames, ignore_index=True).drop_duplicates("수술 ID").to_pickle(op)
@@ -265,7 +271,9 @@ def main():
                     help=".../HANDOVER_인계용_다린/experiments")
     ap.add_argument("--out_root", required=True,
                     help="저장 루트(=report_v3 --darin_root). 예 .../data/inferenced_v3sids")
-    ap.add_argument("--cache_dir", default=None, help="base 모델 HF 캐시 경로")
+    ap.add_argument("--local_models", default=None,
+                    help="base 모델 로컬 루트(하위에 Llama-3.1-8B-Instruct/, Qwen3-8B/). "
+                         f"미지정 시 config MODEL_BASE({MODEL_BASE}) 사용.")
     ap.add_argument("--gpus", default=None,
                     help="예 '6,7' — GPU별 프로세스로 모델 병렬 추론(모델당 1 GPU). "
                          "미지정 시 현재 CUDA_VISIBLE_DEVICES로 단일 실행.")
