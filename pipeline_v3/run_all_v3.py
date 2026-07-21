@@ -19,6 +19,11 @@ v1/v2 오케스트레이터 대비:
   python -m pipeline_v3.run_all_v3 --models llama qwen --gpus 0,1,2,3 --skip_done
   # 3) 최종 1회 (gold 개봉 — 모델/하이퍼 선택이 끝난 뒤에만!)
   python -m pipeline_v3.run_all_v3 --models llama qwen --gpus 0,1,2,3 --skip_done --final
+  # 3') 다린 병기 최종 리포트: 먼저 다린 재추론(gold sid) → 그 다음 --final 리포트에 병기
+  python reinfer_darin_on_v3sids.py --gpus 0,1 --split gold --skip_done
+  python -m pipeline_v3.run_all_v3 --models llama qwen --gpus 0,1,2,3 --skip_done \
+      --final --include_source --include_darin
+  # (--darin_root 미지정 시 config DARIN_INFER_OUT 에서 다린 pkl을 읽음)
 """
 
 import argparse
@@ -352,9 +357,16 @@ def phase_eval(models, exps, eval_gpus, split, skip_done):
                     "--result_files"] + files, f"Evaluate v3({mode})", eval_gpus, "all")
 
 
-def phase_stats_report(split):
-    return run_cmd([PY, "-m", "pipeline_v3.report_v3", "--split", split],
-                   f"Stats+Report({split})", "", "cpu")
+def phase_stats_report(split, include_source=False, include_darin=False,
+                       darin_root=None):
+    cmd = [PY, "-m", "pipeline_v3.report_v3", "--split", split]
+    if include_source:
+        cmd += ["--include_source"]
+    if include_darin:
+        cmd += ["--include_darin"]
+        if darin_root:
+            cmd += ["--darin_root", str(darin_root)]
+    return run_cmd(cmd, f"Stats+Report({split})", "", "cpu")
 
 
 def main():
@@ -370,6 +382,13 @@ def main():
     ap.add_argument("--only_eval", action="store_true")
     ap.add_argument("--final", action="store_true",
                     help="gold(22) 개봉 — dev로 모델 선택이 끝난 뒤 최종 1회만!")
+    ap.add_argument("--include_source", action="store_true",
+                    help="리포트에 비식별 EMR·GT 병기(별도 *_source.html, PHI 포함 — 외부공유 금지).")
+    ap.add_argument("--include_darin", action="store_true",
+                    help="리포트에 다린(기존 연구) 재추론 출력 병기(*_darin.html). "
+                         "다린 pkl은 reinfer_darin_on_v3sids.py 로 미리 생성해 둬야 함.")
+    ap.add_argument("--darin_root", type=str, default=None,
+                    help="다린 재추론 출력 루트. 미지정 시 config DARIN_INFER_OUT 사용.")
     args = ap.parse_args()
 
     exps = EXPERIMENTS if not args.experiments else \
@@ -449,9 +468,12 @@ def main():
         ok = phase_eval(args.models, exps, eval_gpus, "gold", args.skip_done) and ok
 
     # ── Phase 3: 통계 + 리포트 ──
+    #   병기 옵션(source/darin)은 gold(최종) 리포트에만 적용 — dev 자동 리포트는 PHI-free 유지.
     phase_stats_report("dev")
     if args.final:
-        phase_stats_report("gold")
+        phase_stats_report("gold", include_source=args.include_source,
+                           include_darin=args.include_darin,
+                           darin_root=args.darin_root)
 
     log("\nv3 파이프라인 완료." if ok else "\nv3 파이프라인 완료 (일부 평가 실패 — 로그 확인).")
 

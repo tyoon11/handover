@@ -20,7 +20,7 @@ import argparse
 import html as ihtml
 import json
 
-from .config_v3 import EVAL_OUT, REPORT_OUT, RUN_ID, STATS, ensure_dir
+from .config_v3 import DARIN_INFER_OUT, EVAL_OUT, REPORT_OUT, RUN_ID, STATS, ensure_dir
 from .eval_v3.stats import holm_correction, paired_tests
 
 # 모델 식별 색(카테고리) — dataviz 검증 팔레트 slot 1..8 (라이트/다크). 순환 금지.
@@ -751,22 +751,21 @@ def main():
                     help="케이스 토글에 비식별 EMR·GT 병기(별도 파일 *_source.html). "
                          "기본 off — 자동 리포트는 PHI-free 유지.")
     ap.add_argument("--include_darin", action="store_true",
-                    help="케이스별로 다린(기존 연구) 모델 출력 병기. --darin_root 필요. "
-                         "파일명에 _darin 접미사.")
+                    help="케이스별로 다린(기존 연구) 모델 출력 병기. --darin_root 미지정 시 "
+                         "config DARIN_INFER_OUT 사용. 파일명에 _darin 접미사.")
     ap.add_argument("--darin_root", default=None,
                     help="다린 inferenced 디렉토리 경로 "
-                         "(예: .../HANDOVER_인계용_다린/data/inferenced). "
-                         "raw/jsft/self_judge 하위폴더의 *.pkl(컬럼 '수술 ID','인계요약지')을 읽음.")
+                         "(raw/jsft/self_judge 하위폴더의 *.pkl(컬럼 '수술 ID','인계요약지')을 읽음). "
+                         f"미지정 시 config 기본값 {DARIN_INFER_OUT} 사용.")
     args = ap.parse_args()
-    if args.include_darin and not args.darin_root:
-        ap.error("--include_darin 에는 --darin_root 경로가 필요합니다.")
+    darin_root = args.darin_root or (str(DARIN_INFER_OUT) if args.include_darin else None)
     rows, scores = _load(args.split)
     if not rows:
         print(f"[report_v3] {args.split} 평가 요약 없음 — evaluate 먼저 실행")
         return
     pw = pairwise_vs_raw(rows, scores)
     write_outputs(args.split, rows, pw, scores, include_source=args.include_source,
-                  darin_root=(args.darin_root if args.include_darin else None))
+                  darin_root=(darin_root if args.include_darin else None))
 
 
 if __name__ == "__main__":

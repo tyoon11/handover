@@ -63,7 +63,8 @@ from peft import PeftModel
 
 from pipeline_v3.data_splits import load_splits
 from pipeline_v3.prompt_utils import get_sid
-from pipeline_v3.config_v3 import MODEL_BASE  # 로컬 base 모델 루트(local_models)
+from pipeline_v3.config_v3 import (  # 로컬 base 모델 루트 + 다린 경로 기본값
+    MODEL_BASE, DARIN_EXPERIMENTS, DARIN_INFER_OUT)
 
 # 다린 base → local_models 하위 디렉토리명 (config_v3.MODELS 와 동일)
 BASE_DIR = {"llama": "Llama-3.1-8B-Instruct", "qwen": "Qwen3-8B"}
@@ -269,10 +270,11 @@ def main():
     ap.add_argument("--split", choices=["gold", "dev", "both"], default="both",
                     help="both=gold(22)+dev(110) 모두 생성(기본). 한 pkl에 함께 저장돼 "
                          "report_v3 --split gold/dev 양쪽에서 읽힘.")
-    ap.add_argument("--experiments_root", required=True,
-                    help=".../HANDOVER_인계용_다린/experiments")
-    ap.add_argument("--out_root", required=True,
-                    help="저장 루트(=report_v3 --darin_root). 예 .../data/inferenced_v3sids")
+    ap.add_argument("--experiments_root", default=str(DARIN_EXPERIMENTS),
+                    help=f".../HANDOVER_인계용_다린/experiments (기본 {DARIN_EXPERIMENTS})")
+    ap.add_argument("--out_root", default=str(DARIN_INFER_OUT),
+                    help="저장 루트(=report_v3 --darin_root). "
+                         f"기본 {DARIN_INFER_OUT}")
     ap.add_argument("--local_models", default=None,
                     help="base 모델 로컬 루트(하위에 Llama-3.1-8B-Instruct/, Qwen3-8B/). "
                          f"미지정 시 config MODEL_BASE({MODEL_BASE}) 사용.")

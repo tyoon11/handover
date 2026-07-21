@@ -65,6 +65,17 @@ GOLD_SY_XLSX = DATA_DIR / "gold_sampled" / "인계요약지_SY.xlsx"     # 전�
 # 수술ID remap (PHI — repo 금지, 데이터 폴더 JSON에서 로드)
 KHS_REMAP_JSON = DATA_DIR / "preprocessed" / "khs_gold_remap.json"
 
+# ── 다린(기존 연구) 재추론 경로 (reinfer_darin_on_v3sids.py / report_v3 병기 공용) ──
+#   기본값은 handover BASE_DIR 의 형제 폴더 HANDOVER_인계용_다린. env 로 오버라이드 가능.
+#   DARIN_EXPERIMENTS: 다린 학습 체크포인트(adapter) 루트 (reinfer --experiments_root)
+#   DARIN_INFER_OUT  : v3 sid 재추론 출력 루트 (reinfer --out_root = report_v3 --darin_root)
+DARIN_DIR = Path(os.environ.get("HANDOVER_DARIN_DIR",
+                                str(BASE_DIR.parent / "HANDOVER_인계용_다린")))
+DARIN_EXPERIMENTS = Path(os.environ.get("HANDOVER_DARIN_EXPERIMENTS",
+                                        str(DARIN_DIR / "experiments")))
+DARIN_INFER_OUT = Path(os.environ.get("HANDOVER_DARIN_INFER_OUT",
+                                      str(DARIN_DIR / "data" / "inferenced_v3sids")))
+
 
 def load_khs_remap() -> dict:
     """{잘못된_sid(str): 실제_sid(str)}. 파일 없으면 빈 dict (경고는 호출부에서)."""

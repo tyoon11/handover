@@ -45,6 +45,13 @@ python -m pipeline_v3.run_all_v3 --models llama qwen --gpus 0,1,2,3 --gpus_per_j
 
 # 최종 1회 (gold 22 개봉 — dev로 선택 끝난 뒤에만)
 python -m pipeline_v3.run_all_v3 --models llama qwen --gpus 0,1,2,3 --gpus_per_job 2 --skip_done --final
+
+# 다린(기존 연구) 병기 최종 gold 리포트: 다린 재추론(gold sid) → --final 리포트에 병기
+#   경로는 config 기본값(HANDOVER_DARIN_DIR)에서 자동 — 필요 시 --out_root/--darin_root 로 override
+python reinfer_darin_on_v3sids.py --gpus 0,1 --split gold --skip_done
+python -m pipeline_v3.run_all_v3 --models llama qwen --gpus 0,1,2,3 --gpus_per_job 2 \
+    --skip_done --final --include_source --include_darin
+#   → outputs_v3/<run>/report/results_gold_v3_source_darin.html (EMR·GT·v3·다린 병기, PHI 포함=외부공유 금지)
 ```
 
 ## 실험 매트릭스 (모델당 7변형)
