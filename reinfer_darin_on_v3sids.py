@@ -45,6 +45,11 @@ import subprocess
 import sys
 from copy import deepcopy
 
+# 폐쇄망: HF 허브 온라인 조회 차단 → 로컬 캐시만 사용 (transformers import 전에 설정해야 함).
+# 외부에서 export 로 0을 주면 존중(온라인 환경 호환).
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
 import numpy as np
 import pandas as pd
 import torch
@@ -154,14 +159,16 @@ def load_model(setting_type, model_type, is_raw, experiments_root, cache_dir, ma
     model = AutoModelForCausalLM.from_pretrained(
         base, torch_dtype=torch.bfloat16, device_map="auto",
         max_memory=({0: f"{max_gb}GB"} if max_gb else None),
-        cache_dir=cache_dir or None)
+        cache_dir=cache_dir or None, local_files_only=True)
     if not is_raw:
         peft_dir = os.path.join(experiments_root, setting_type, model_type)
         print(f"  adapter={peft_dir}")
-        model = PeftModel.from_pretrained(model, peft_dir)
-        tok = AutoTokenizer.from_pretrained(peft_dir, use_fast=True)
+        model = PeftModel.from_pretrained(model, peft_dir, local_files_only=True)
+        tok = AutoTokenizer.from_pretrained(peft_dir, use_fast=True,
+                                            local_files_only=True)
     else:
-        tok = AutoTokenizer.from_pretrained(base, use_fast=True)
+        tok = AutoTokenizer.from_pretrained(base, use_fast=True, cache_dir=cache_dir or None,
+                                            local_files_only=True)
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
     tok.truncation_side = "left"
