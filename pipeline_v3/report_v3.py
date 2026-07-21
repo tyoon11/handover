@@ -205,7 +205,98 @@ def _load_sources(split):
     return out
 
 
-def write_outputs(split, rows, pw, scores=None, include_source=False):
+# ── 다린(기존 연구) 모델 출력 로드 — --include_darin 일 때만 (비교 병기용) ─────────
+#   data/inferenced/{raw,jsft,self_judge}/{model}.pkl 에 생성텍스트 컬럼 '인계요약지',
+#   sid 컬럼 '수술 ID'. base 모델·평가셋이 v3와 달라 '같은 sid의 다른 모델 출력' 병기다.
+_DARIN_SELFJUDGE = {"dpo": "rlaif_dpo", "simpo": "rlaif_simpo",
+                    "dpo_jsft_1epoch": "sft_1ep_dpo", "dpo_jsft_3epoch": "sft_3ep_dpo"}
+
+
+def _darin_tag(setting: str, stem: str):
+    """(설명dir, 파일stem) → v3 tag. 예: ('self_judge','llama_dpo_jsft_1epoch')
+    → 'llama_sft_1ep_dpo'. 매칭 불가 시 None."""
+    if stem.startswith("llama"):
+        fam, rest = "llama", stem[len("llama"):].lstrip("_")
+    elif stem.startswith("qwen"):
+        fam, rest = "qwen35", stem[len("qwen"):].lstrip("_")   # 다린 qwen → v3 qwen35
+    else:
+        return None
+    if setting == "raw":
+        return f"{fam}_raw"
+    if setting == "jsft":
+        return f"{fam}_sft_3ep" if rest == "3epoch" else f"{fam}_sft_1ep"
+    if setting == "self_judge":
+        v = _DARIN_SELFJUDGE.get(rest)
+        return f"{fam}_{v}" if v else None
+    return None
+
+
+def _darin_sid_and_text_cols(df):
+    """MultiIndex/flat 모두 대응: (sid_col, text_col) 반환. 못 찾으면 (None,None)."""
+    def find(pred):
+        for c in df.columns:
+            top = c[0] if isinstance(c, tuple) else c
+            if pred(str(top)):
+                return c
+        return None
+    sid_c = find(lambda t: t.replace(" ", "") == "수술ID")
+    txt_c = find(lambda t: t == "인계요약지")
+    return sid_c, txt_c
+
+
+def _load_darin_outputs(darin_root):
+    """{v3_tag: {sid(int): 생성텍스트}} — darin_root = .../data/inferenced. 실패 시 {}."""
+    import re
+    from pathlib import Path
+    root = Path(darin_root)
+    if not root.exists():
+        print(f"[report_v3] 다린 출력 경로 없음: {root} → 병기 생략")
+        return {}
+    try:
+        import pandas as pd
+    except Exception:
+        return {}
+    out = {}
+    n_files = 0
+    for setting in ("raw", "jsft", "self_judge"):
+        d = root / setting
+        if not d.is_dir():
+            continue
+        for fp in sorted(d.glob("*.pkl")):
+            tag = _darin_tag(setting, fp.stem)
+            if not tag:
+                print(f"[report_v3] 다린 파일 매핑 실패 skip: {setting}/{fp.name}")
+                continue
+            try:
+                df = pd.read_pickle(fp)
+            except Exception as e:
+                print(f"[report_v3] 다린 pkl 로드 실패 {fp.name}: {type(e).__name__}")
+                continue
+            sid_c, txt_c = _darin_sid_and_text_cols(df)
+            if sid_c is None or txt_c is None:
+                print(f"[report_v3] 다린 컬럼(수술 ID/인계요약지) 못 찾음: {fp.name}")
+                continue
+            m = {}
+            for _, row in df.iterrows():
+                sv, tv = row[sid_c], row[txt_c]
+                try:
+                    sid = int(sv.iloc[0] if hasattr(sv, "iloc") else
+                              (sv[0] if isinstance(sv, (list, tuple)) else sv))
+                except (TypeError, ValueError):
+                    continue
+                if tv is None or (isinstance(tv, float) and tv != tv):
+                    continue
+                m[sid] = str(tv).strip()
+            if m:
+                out[tag] = m
+                n_files += 1
+    print(f"[report_v3] 다린 출력 로드: {n_files}개 변형, "
+          f"{sum(len(v) for v in out.values())}건")
+    return out
+
+
+def write_outputs(split, rows, pw, scores=None, include_source=False,
+                  darin_root=None):
     scores = scores or {}
     out_dir = ensure_dir(REPORT_OUT)
     # CSV
@@ -264,13 +355,16 @@ def write_outputs(split, rows, pw, scores=None, include_source=False):
 
     # HTML (리치 — 대시보드 + 케이스 토글). --include_source면 EMR/GT(비식별) 포함.
     sources = _load_sources(split) if include_source else {}
-    html = _build_html(split, rows, pw, scores, rev, sources)
-    html_name = f"results_{split}_v3_source.html" if include_source \
-        else f"results_{split}_v3.html"
+    darin = _load_darin_outputs(darin_root) if darin_root else {}
+    html = _build_html(split, rows, pw, scores, rev, sources, darin)
+    base = f"results_{split}_v3" + ("_source" if include_source else "") \
+        + ("_darin" if darin else "")
+    html_name = base + ".html"
     (out_dir / html_name).write_text(html, encoding="utf-8")
 
     print(f"[report_v3] 저장: {out_dir}/results_{split}_v3.(csv|md) + {html_name}"
-          + (" [EMR/GT 포함 — 외부공유 금지]" if include_source else ""))
+          + (" [EMR/GT 포함 — 외부공유 금지]" if include_source else "")
+          + (" [다린 출력 병기]" if darin else ""))
 
 
 # ── 리치 HTML 빌더 ────────────────────────────────────────────────────────────
@@ -364,6 +458,8 @@ summary .meta{{font-weight:400;color:var(--ink2);font-size:12px;
 .pane.emr{{grid-column:1/-1}}
 .pane.out{{background:var(--surface);box-shadow:inset 3px 0 0 var(--good)}}
 .pane.gt{{box-shadow:inset 3px 0 0 var(--axis)}}
+.pane.darin{{box-shadow:inset 3px 0 0 var(--muted)}}
+.darinout{{color:var(--ink2);border-left:2px solid var(--grid)}}
 .plabel{{font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);
   margin-bottom:4px}}
 .ptext{{font-size:12px;white-space:pre-wrap;word-break:break-word;color:var(--ink);
@@ -485,21 +581,31 @@ def _gate_span(gate):
     return "—" if not gate else ihtml.escape(gate)
 
 
-def _case_table(split, recs):
-    """소스 미포함 컴팩트 표 (PHI-free 기본)."""
+def _case_table(split, recs, dmap=None):
+    """소스 미포함 컴팩트 표 (PHI-free 기본). dmap: {sid: 다린출력} 있으면 열 추가."""
     is_gold = (split == "gold")
+    show_darin = dmap is not None
     head = ("<div class='wrap'><table><tr><th>sid</th><th>comp</th>"
             + ("<th>cov</th>" if is_gold else "")
             + "<th>faith</th><th>brev</th><th>gate</th>"
             + ("<th class='l'>missed(gold)</th>" if is_gold else "")
-            + "<th class='l'>생성 인계문</th></tr>")
+            + "<th class='l'>생성 인계문 (v3)</th>"
+            + ("<th class='l'>다린(기존) 출력</th>" if show_darin else "")
+            + "</tr>")
     body = []
     for r in recs:
         off = r.get("official") or {}
-        sid = ihtml.escape(str(r.get("sid", "")))
+        sid_raw = r.get("sid", "")
+        sid = ihtml.escape(str(sid_raw))
+        darin_c = ""
+        if show_darin:
+            dtxt = dmap.get(sid_raw) or (dmap.get(int(sid_raw))
+                                         if str(sid_raw).isdigit() else None)
+            darin_c = (f"<td class='gen darinout'>{ihtml.escape(dtxt)}</td>" if dtxt
+                       else "<td class='darinout'>—</td>")
         if off.get("excluded"):
             reason = ihtml.escape(str(off.get("exclude_reason") or "제외"))
-            cols = 6 + (2 if is_gold else 0)
+            cols = 6 + (2 if is_gold else 0) + (1 if show_darin else 0)
             body.append(f"<tr><td>{sid}</td><td class='l exc' colspan='{cols-1}'>"
                         f"제외: {reason}</td></tr>")
             continue
@@ -514,13 +620,16 @@ def _case_table(split, recs):
             f"<tr><td>{sid}</td><td>{_num(off.get('composite'))}</td>{cov_c}"
             f"<td>{_num(off.get('faithfulness'))}</td>"
             f"<td>{_num(off.get('brevity'))}</td><td>{_gate_span(off.get('gate') or '')}</td>"
-            f"{missed_c}<td class='gen'>{gen or '<span class=exc>(빈 출력)</span>'}</td></tr>")
+            f"{missed_c}<td class='gen'>{gen or '<span class=exc>(빈 출력)</span>'}</td>"
+            f"{darin_c}</tr>")
     return head + "".join(body) + "</table></div>"
 
 
-def _case_blocks(split, recs, sources):
-    """소스 포함 블록 — 케이스마다 입력(EMR·vital)·GT·모델출력 나란히."""
+def _case_blocks(split, recs, sources, dmap=None):
+    """소스 포함 블록 — 케이스마다 입력(EMR·vital)·GT·모델출력 나란히.
+    dmap: {sid: 다린출력} 있으면 v3 출력 옆에 다린 출력 패널 추가."""
     is_gold = (split == "gold")
+    show_darin = dmap is not None
     out = []
     for r in recs:
         off = r.get("official") or {}
@@ -551,15 +660,22 @@ def _case_blocks(split, recs, sources):
             panes.append(f"<div class='pane gt'><div class='plabel'>정답 · 전문의 GT</div>"
                          f"<div class='ptext'>{ihtml.escape(str(src['gt']))}</div></div>")
         gen = ihtml.escape(str(r.get("generated", "")))
-        panes.append(f"<div class='pane out'><div class='plabel'>모델 출력</div>"
+        panes.append(f"<div class='pane out'><div class='plabel'>모델 출력 (v3)</div>"
                      f"<div class='ptext'>{gen or '<span class=exc>(빈 출력)</span>'}</div></div>")
+        if show_darin:
+            dtxt = dmap.get(sid) or (dmap.get(int(sid))
+                                     if str(sid).isdigit() else None)
+            panes.append(
+                f"<div class='pane darin'><div class='plabel'>다린(기존 모델) 출력</div>"
+                f"<div class='ptext'>{ihtml.escape(dtxt) if dtxt else '<span class=exc>(해당 sid 출력 없음)</span>'}"
+                f"</div></div>")
         out.append(f"<div class='case'><div class='case-hd'>{''.join(hd)}</div>"
                    f"<div class='panes'>{''.join(panes)}</div></div>")
     return "".join(out)
 
 
-def _case_toggles(split, rows, scores, sources):
-    """변형별 <details> 토글 — 케이스별 점수·게이트·(옵션)입력/GT·모델출력."""
+def _case_toggles(split, rows, scores, sources, darin=None):
+    """변형별 <details> 토글 — 케이스별 점수·게이트·(옵션)입력/GT·모델출력·다린출력."""
     if not scores:
         return "<p class='sub'>per-case 점수 파일(scores jsonl) 없음 — 케이스 상세 생략.</p>"
 
@@ -580,8 +696,9 @@ def _case_toggles(split, rows, scores, sources):
         if not recs:
             continue
         recs = sorted(recs, key=_key)
-        inner = _case_blocks(split, recs, sources) if sources \
-            else _case_table(split, recs)
+        dmap = darin.get(tag) if darin else None
+        inner = _case_blocks(split, recs, sources, dmap) if sources \
+            else _case_table(split, recs, dmap)
         meta = (f"composite {_num(s['composite']['mean'])} · "
                 f"유효 {s['n_valid']}/{s['n_valid']+s['n_excluded']}")
         out.append(f"<details><summary><span>{ihtml.escape(tag)}</span>"
@@ -589,8 +706,9 @@ def _case_toggles(split, rows, scores, sources):
     return "".join(out)
 
 
-def _build_html(split, rows, pw, scores, rev, sources=None):
+def _build_html(split, rows, pw, scores, rev, sources=None, darin=None):
     sources = sources or {}
+    darin = darin or {}
     models = sorted({s["model"] for s in rows.values()})
     model_colors = _model_colors(models)
     cards = "".join(
@@ -618,7 +736,7 @@ def _build_html(split, rows, pw, scores, rev, sources=None):
         "<h2>제외 · 안전게이트 상세</h2>"
         f"{_exclusions_table(rows, scores)}"
         "<h2>케이스별 예시 출력 (변형 클릭해 펼치기)</h2>"
-        f"{_case_toggles(split, rows, scores, sources)}"
+        f"{_case_toggles(split, rows, scores, sources, darin)}"
         "<p class='foot'>composite = 0.5·coverage + 0.3·faithfulness + 0.2·brevity "
         "(dev는 coverage 미측정→faith/brev 재정규화). "
         + ("입력 EMR·GT는 비식별 처리(병록번호·이름 제외) — 외부 공유 금지."
@@ -632,13 +750,23 @@ def main():
     ap.add_argument("--include_source", action="store_true",
                     help="케이스 토글에 비식별 EMR·GT 병기(별도 파일 *_source.html). "
                          "기본 off — 자동 리포트는 PHI-free 유지.")
+    ap.add_argument("--include_darin", action="store_true",
+                    help="케이스별로 다린(기존 연구) 모델 출력 병기. --darin_root 필요. "
+                         "파일명에 _darin 접미사.")
+    ap.add_argument("--darin_root", default=None,
+                    help="다린 inferenced 디렉토리 경로 "
+                         "(예: .../HANDOVER_인계용_다린/data/inferenced). "
+                         "raw/jsft/self_judge 하위폴더의 *.pkl(컬럼 '수술 ID','인계요약지')을 읽음.")
     args = ap.parse_args()
+    if args.include_darin and not args.darin_root:
+        ap.error("--include_darin 에는 --darin_root 경로가 필요합니다.")
     rows, scores = _load(args.split)
     if not rows:
         print(f"[report_v3] {args.split} 평가 요약 없음 — evaluate 먼저 실행")
         return
     pw = pairwise_vs_raw(rows, scores)
-    write_outputs(args.split, rows, pw, scores, include_source=args.include_source)
+    write_outputs(args.split, rows, pw, scores, include_source=args.include_source,
+                  darin_root=(args.darin_root if args.include_darin else None))
 
 
 if __name__ == "__main__":
