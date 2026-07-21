@@ -29,15 +29,16 @@ reinfer_darin_on_v3sids.py — 다린 체크포인트를 v3 sid(gold/dev)에 재
   (dev도 함께 생성했다면 --split dev 로도 병기됨)
 
 사용 (v3 repo 루트에서 실행 — pipeline_v3 import 되는 곳)
-  # GPU 2장 병렬 (모델 단위로 분배 — 각 8B라 1장당 1모델)
+  # GPU 2장 병렬 (GPU당 모델 하나씩; 각 모델은 1 GPU에 통째로 — 모델을 쪼개지 않음)
+  # 기본 --split both → gold(22)+dev(110) 모두 생성(한 pkl에 함께 저장).
   # base 모델은 local_models 하위에서 로드(Llama-3.1-8B-Instruct/, Qwen3-8B/).
   # --local_models 미지정 시 config MODEL_BASE(=HANDOVER_MODEL_DIR) 사용.
-  python reinfer_darin_on_v3sids.py --split gold --gpus 6,7 \
+  python reinfer_darin_on_v3sids.py --gpus 6,7 \
       --experiments_root ~/workspace/data/HANDOVER_인계용_다린/experiments \
       --out_root         ~/workspace/data/HANDOVER_인계용_다린/data/inferenced_v3sids \
       --skip_done
   # 단일 GPU
-  CUDA_VISIBLE_DEVICES=6 python reinfer_darin_on_v3sids.py --split gold \
+  CUDA_VISIBLE_DEVICES=6 python reinfer_darin_on_v3sids.py \
       --experiments_root ... --out_root ... --skip_done
 """
 import argparse
@@ -158,13 +159,14 @@ def out_path(out_root, setting_type, model_type, is_raw):
     return os.path.join(out_root, setting_type, f"{model_type}.pkl")
 
 
-def load_model(setting_type, model_type, is_raw, experiments_root, models_root, max_gb):
+def load_model(setting_type, model_type, is_raw, experiments_root, models_root):
     key = "llama" if "llama" in model_type else "qwen"
     base = str(models_root / BASE_DIR[key])   # local_models 하위 로컬 경로
     print(f"  base={base}  raw={is_raw}")
+    # 모델 전체를 '보이는 GPU 1장'(cuda:0)에 올린다. device_map='auto'와 달리
+    # 여러 GPU가 보여도 한 모델을 쪼개지 않는다 (GPU당 모델 하나씩 병렬용).
     model = AutoModelForCausalLM.from_pretrained(
-        base, torch_dtype=torch.bfloat16, device_map="auto",
-        max_memory=({0: f"{max_gb}GB"} if max_gb else None),
+        base, torch_dtype=torch.bfloat16, device_map={"": 0},
         local_files_only=True)
     if not is_raw:
         peft_dir = os.path.join(experiments_root, setting_type, model_type)
@@ -206,8 +208,6 @@ def launch_parallel(args, gpus):
             "--out_root", args.out_root]
     if args.local_models:
         base += ["--local_models", args.local_models]
-    if args.max_gb:
-        base += ["--max_gb", str(args.max_gb)]
     if args.skip_raw:
         base += ["--skip_raw"]
     if args.skip_done:
@@ -225,9 +225,9 @@ def launch_parallel(args, gpus):
         print(f"[launch] 일부 워커 실패 rc={rcs}", file=sys.stderr)
         sys.exit(1)
     print("\n전체 완료. 리포트 재생성:")
-    print(f"  HANDOVER_RUN_ID=$RUN_ID python -m pipeline_v3.report_v3 "
-          f"--split {'gold' if args.split != 'dev' else 'dev'} "
-          f"--include_source --include_darin --darin_root {args.out_root}")
+    for s in (("gold", "dev") if args.split == "both" else (args.split,)):
+        print(f"  HANDOVER_RUN_ID=$RUN_ID python -m pipeline_v3.report_v3 "
+              f"--split {s} --include_source --include_darin --darin_root {args.out_root}")
 
 
 def run_inference(args):
@@ -255,7 +255,7 @@ def run_inference(args):
         print(f"\n{tag}=== {setting_type}/{model_type} (raw={is_raw}) ===")
         models_root = Path(args.local_models) if args.local_models else MODEL_BASE
         model, tok = load_model(setting_type, model_type, is_raw,
-                                args.experiments_root, models_root, args.max_gb)
+                                args.experiments_root, models_root)
         frames = [generate_for_df(model, tok, df, model_type) for df in targets.values()]
         os.makedirs(os.path.dirname(op), exist_ok=True)
         pd.concat(frames, ignore_index=True).drop_duplicates("수술 ID").to_pickle(op)
@@ -266,7 +266,9 @@ def run_inference(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--split", choices=["gold", "dev", "both"], default="gold")
+    ap.add_argument("--split", choices=["gold", "dev", "both"], default="both",
+                    help="both=gold(22)+dev(110) 모두 생성(기본). 한 pkl에 함께 저장돼 "
+                         "report_v3 --split gold/dev 양쪽에서 읽힘.")
     ap.add_argument("--experiments_root", required=True,
                     help=".../HANDOVER_인계용_다린/experiments")
     ap.add_argument("--out_root", required=True,
@@ -277,7 +279,6 @@ def main():
     ap.add_argument("--gpus", default=None,
                     help="예 '6,7' — GPU별 프로세스로 모델 병렬 추론(모델당 1 GPU). "
                          "미지정 시 현재 CUDA_VISIBLE_DEVICES로 단일 실행.")
-    ap.add_argument("--max_gb", type=int, default=0, help="GPU max_memory GB(0=제한없음)")
     ap.add_argument("--skip_raw", action="store_true", help="raw(base) 변형 건너뛰기")
     ap.add_argument("--skip_done", action="store_true", help="출력 pkl 있으면 건너뛰기")
     ap.add_argument("--shard", default=None,
