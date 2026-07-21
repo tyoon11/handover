@@ -25,8 +25,9 @@ export LD_PRELOAD=$CONDA_PREFIX/lib/libstdc++.so.6
 필요 데이터(서버 `DATA_DIR`에 있어야 함): v1과 동일한 pkl들
 (`gold_sampled_251008.pkl`, `jsft_251008.pkl`, `selfjudge_251008.pkl`, `rlhf_251008.pkl`,
 `vital_summary_map.pkl`) + `gold_sampled/인계요약지_gold_sampled_251002_KHS.xlsx`
+
 + `gold_sampled/인계요약지_SY.xlsx` + **`preprocessed/khs_gold_remap.json`**
-(수술ID remap — PHI라서 repo에 없음; 기존 작업 PC의 `data/preprocessed/`에서 복사).
+  (수술ID remap — PHI라서 repo에 없음; 기존 작업 PC의 `data/preprocessed/`에서 복사).
 
 ## 실행 순서 (요약 — 상세는 PIPELINE_V3.md §6)
 
@@ -54,11 +55,11 @@ raw / rlaif_dpo / rlaif_simpo / sft_1ep / sft_3ep / sft_1ep_dpo / sft_3ep_dpo
 
 ## 평가 요약 (v3)
 
-| 축 | 정의 | judge |
-|---|---|---|
-| coverage (0.5) | 전문의 gold checklist recall (macro+micro) | gemma4_31b + qwen35 교차 |
-| faithfulness (0.3) | claim의 EMR entailment (주입 방어 구분자) | 〃 |
-| brevity (0.2) | 과설명/행정 노이즈 감점 | 〃 |
+| 축                 | 정의                                       | judge                    |
+| ------------------ | ------------------------------------------ | ------------------------ |
+| coverage (0.5)     | 전문의 gold checklist recall (macro+micro) | gemma4_31b + qwen35 교차 |
+| faithfulness (0.3) | claim의 EMR entailment (주입 방어 구분자)  | 〃                       |
+| brevity (0.2)      | 과설명/행정 노이즈 감점                    | 〃                       |
 
 - 이상소견 케이스에 "특이사항 없음" → composite 0 (안전게이트, `gate=missed_abnormal`)
 - judge 실패/gold 부재는 점수가 아니라 **제외**로 집계 (유효비율 <80%면 평가 실패 처리)
@@ -76,16 +77,16 @@ raw / rlaif_dpo / rlaif_simpo / sft_1ep / sft_3ep / sft_1ep_dpo / sft_3ep_dpo
 
 ## 바이탈 threshold 출처 (v1에서 유지)
 
-| 항목 | 기준 | 출처 |
-|------|------|------|
-| HR | 연령별 서맥/빈맥 | 대한소아청소년과학회 |
-| SBP 저혈압 | 70+2×age(yr) | PALS/ATLS |
-| SBP 고혈압 | 연령별 95th pct | 대한소아청소년학회 2008 |
-| MBP 저혈압 | 1.5×age(yr)+40 | PMID 17273118 |
-| DBP 저/고 | 연령별 5th/90th pct | AAP 4th Report |
-| QTc | <8세 >450ms, ≥8세 >460ms | PMID 16482041 |
-| SpO2 | <95% / <90% | — |
-| T1 | <35.5°C / >38.0°C | — |
+| 항목       | 기준                      | 출처                    |
+| ---------- | ------------------------- | ----------------------- |
+| HR         | 연령별 서맥/빈맥          | 대한소아청소년과학회    |
+| SBP 저혈압 | 70+2×age(yr)             | PALS/ATLS               |
+| SBP 고혈압 | 연령별 95th pct           | 대한소아청소년학회 2008 |
+| MBP 저혈압 | 1.5×age(yr)+40           | PMID 17273118           |
+| DBP 저/고  | 연령별 5th/90th pct       | AAP 4th Report          |
+| QTc        | <8세 >450ms, ≥8세 >460ms | PMID 16482041           |
+| SpO2       | <95% / <90%               | —                      |
+| T1         | <35.5°C / >38.0°C       | —                      |
 
 ## IRB / DRB
 
