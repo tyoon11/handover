@@ -29,15 +29,20 @@ reinfer_darin_on_v3sids.py — 다린 체크포인트를 v3 sid(gold/dev)에 재
   (dev도 함께 생성했다면 --split dev 로도 병기됨)
 
 사용 (v3 repo 루트에서 실행 — pipeline_v3 import 되는 곳)
-  CUDA_VISIBLE_DEVICES=6 python reinfer_darin_on_v3sids.py \
-      --split gold \
+  # GPU 2장 병렬 (모델 단위로 분배 — 각 8B라 1장당 1모델)
+  python reinfer_darin_on_v3sids.py --split gold --gpus 6,7 \
       --experiments_root ~/workspace/data/HANDOVER_인계용_다린/experiments \
       --out_root         ~/workspace/data/HANDOVER_인계용_다린/data/inferenced_v3sids \
       --cache_dir        /home/coder/workspace/data/share/_hf_models/ \
       --skip_done
+  # 단일 GPU
+  CUDA_VISIBLE_DEVICES=6 python reinfer_darin_on_v3sids.py --split gold \
+      --experiments_root ... --out_root ... --skip_done
 """
 import argparse
 import os
+import subprocess
+import sys
 from copy import deepcopy
 
 import numpy as np
@@ -180,6 +185,72 @@ def generate_for_df(model, tok, df, model_type):
     return pd.DataFrame({"수술 ID": sids, "인계요약지": gens})
 
 
+def launch_parallel(args, gpus):
+    """GPU별로 이 스크립트를 --shard i/n 워커로 띄워 모델을 나눠 추론."""
+    n = len(gpus)
+    base = [sys.executable, os.path.abspath(__file__),
+            "--split", args.split,
+            "--experiments_root", args.experiments_root,
+            "--out_root", args.out_root]
+    if args.cache_dir:
+        base += ["--cache_dir", args.cache_dir]
+    if args.max_gb:
+        base += ["--max_gb", str(args.max_gb)]
+    if args.skip_raw:
+        base += ["--skip_raw"]
+    if args.skip_done:
+        base += ["--skip_done"]
+
+    procs = []
+    for i, g in enumerate(gpus):
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = g
+        cmd = base + ["--shard", f"{i}/{n}"]
+        print(f"[launch] GPU {g} ← shard {i}/{n}")
+        procs.append(subprocess.Popen(cmd, env=env))
+    rcs = [p.wait() for p in procs]
+    if any(rcs):
+        print(f"[launch] 일부 워커 실패 rc={rcs}", file=sys.stderr)
+        sys.exit(1)
+    print("\n전체 완료. 리포트 재생성:")
+    print(f"  HANDOVER_RUN_ID=$RUN_ID python -m pipeline_v3.report_v3 "
+          f"--split {'gold' if args.split != 'dev' else 'dev'} "
+          f"--include_source --include_darin --darin_root {args.out_root}")
+
+
+def run_inference(args):
+    """단일 프로세스(1 GPU) 추론. --shard i/n 이면 MODEL_L[i::n]만 담당."""
+    torch.manual_seed(42); np.random.seed(42)
+    need = ("gold", "dev") if args.split == "both" else (args.split,)
+    sp = load_splits(need=need)
+    targets = {s: sp[s] for s in need}
+    tag = f"[shard {args.shard}] " if args.shard else ""
+    for s, df in targets.items():
+        print(f"{tag}[target] {s}: {len(df)}건")
+
+    todo = [m for m in MODEL_L if not (args.skip_raw and m[2])]
+    if args.shard:
+        i, n = (int(x) for x in args.shard.split("/"))
+        todo = todo[i::n]
+    print(f"{tag}담당 변형 {len(todo)}개 (CUDA_VISIBLE_DEVICES="
+          f"{os.environ.get('CUDA_VISIBLE_DEVICES','?')})")
+
+    for setting_type, model_type, is_raw in todo:
+        op = out_path(args.out_root, setting_type, model_type, is_raw)
+        if args.skip_done and os.path.exists(op):
+            print(f"{tag}[skip_done] {op}")
+            continue
+        print(f"\n{tag}=== {setting_type}/{model_type} (raw={is_raw}) ===")
+        model, tok = load_model(setting_type, model_type, is_raw,
+                                args.experiments_root, args.cache_dir, args.max_gb)
+        frames = [generate_for_df(model, tok, df, model_type) for df in targets.values()]
+        os.makedirs(os.path.dirname(op), exist_ok=True)
+        pd.concat(frames, ignore_index=True).drop_duplicates("수술 ID").to_pickle(op)
+        print(f"{tag}[saved] {op}")
+        del model
+        torch.cuda.empty_cache()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--split", choices=["gold", "dev", "both"], default="gold")
@@ -188,38 +259,24 @@ def main():
     ap.add_argument("--out_root", required=True,
                     help="저장 루트(=report_v3 --darin_root). 예 .../data/inferenced_v3sids")
     ap.add_argument("--cache_dir", default=None, help="base 모델 HF 캐시 경로")
-    ap.add_argument("--max_gb", type=int, default=0, help="GPU0 max_memory GB(0=제한없음)")
+    ap.add_argument("--gpus", default=None,
+                    help="예 '6,7' — GPU별 프로세스로 모델 병렬 추론(모델당 1 GPU). "
+                         "미지정 시 현재 CUDA_VISIBLE_DEVICES로 단일 실행.")
+    ap.add_argument("--max_gb", type=int, default=0, help="GPU max_memory GB(0=제한없음)")
     ap.add_argument("--skip_raw", action="store_true", help="raw(base) 변형 건너뛰기")
     ap.add_argument("--skip_done", action="store_true", help="출력 pkl 있으면 건너뛰기")
+    ap.add_argument("--shard", default=None,
+                    help="내부용 'i/n' — launcher가 GPU별로 자동 설정(직접 줄 필요 없음)")
     args = ap.parse_args()
 
-    torch.manual_seed(42); np.random.seed(42)
-    need = ("gold", "dev") if args.split == "both" else (args.split,)
-    sp = load_splits(need=need)
-    targets = {s: sp[s] for s in need}
-    for s, df in targets.items():
-        print(f"[target] {s}: {len(df)}건")
-
-    todo = [m for m in MODEL_L if not (args.skip_raw and m[2])]
-    for setting_type, model_type, is_raw in todo:
-        op = out_path(args.out_root, setting_type, model_type, is_raw)
-        if args.skip_done and os.path.exists(op):
-            print(f"[skip_done] {op}")
-            continue
-        print(f"\n=== {setting_type}/{model_type} (raw={is_raw}) ===")
-        model, tok = load_model(setting_type, model_type, is_raw,
-                                args.experiments_root, args.cache_dir, args.max_gb)
-        frames = [generate_for_df(model, tok, df, model_type) for df in targets.values()]
-        os.makedirs(os.path.dirname(op), exist_ok=True)
-        pd.concat(frames, ignore_index=True).drop_duplicates("수술 ID").to_pickle(op)
-        print(f"[saved] {op}")
-        del model
-        torch.cuda.empty_cache()
-
-    print("\n완료. 리포트 재생성:")
-    print(f"  HANDOVER_RUN_ID=$RUN_ID python -m pipeline_v3.report_v3 "
-          f"--split {'gold' if args.split!='dev' else 'dev'} "
-          f"--include_source --include_darin --darin_root {args.out_root}")
+    if args.gpus and not args.shard:
+        gpus = [g.strip() for g in args.gpus.split(",") if g.strip()]
+        if len(gpus) > 1:
+            launch_parallel(args, gpus)
+            return
+        if gpus:                       # 1장만 준 경우: env 세팅해 단일 실행
+            os.environ["CUDA_VISIBLE_DEVICES"] = gpus[0]
+    run_inference(args)
 
 
 if __name__ == "__main__":
