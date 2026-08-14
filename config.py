@@ -9,7 +9,12 @@ from pathlib import Path
 BASE_DIR = Path("/home/coder/workspace/data/handover")
 DATA_DIR = BASE_DIR / "data"
 WORK_DIR = Path("/home/coder/workspace/data/handover/0526/handover")
-WORK_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    # import 부수효과. 서버 밖(로컬 검증·테스트)에서는 만들 수 없으므로 삼킨다 —
+    # 여기서 죽으면 utils/vital_summarizer.py 를 import 하는 것조차 불가능해진다.
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    pass
 
 # ── EMR / Vital 원본 pkl ───────────────────────────────────────────────────
 EMR_PKL = DATA_DIR / "raw_data/new_irb/all_newirb_260202.pkl"

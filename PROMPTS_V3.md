@@ -40,10 +40,29 @@ RULES:
 - NEVER include normal/stable findings, routine vitals, surgery steps, administrative drug info, or transfer phrases.
 - NO lists, NO explanations, NO repetition.
 
-Focus only on abnormal findings relevant after surgery: airway/respiratory status, hemodynamics/bleeding/transfusion,
-major or congenital disease, intra-op events already recorded, drug effects, essential lines/devices,
-and cooperation/agitation risk. Pediatric airway, fluids, and drug sensitivity are especially important.
+MANDATORY CHECK — go through these six groups and report EVERY one that has an abnormal
+finding in the EMR. Omitting a group that HAS a finding is the worst possible error.
+Do NOT write anything for a group that has no finding.
+1. 기저질환·약물 — major/congenital disease, comorbidity, drugs given and their post-op effect, allergy
+2. 기도관리 — ETT/LMA and size, difficult airway, extubation status, laryngospasm/bronchospasm/croup, O2 need
+3. 수술 중 이벤트 및 처치 — hypotension/bradycardia/arrhythmia/desaturation/hypothermia and what was done, lines/devices
+4. 수혈·수액 — blood loss, transfused products, total fluids, urine output, volume status at the end
+5. 수술 전 검사이상 — abnormal pre-op labs/coagulation/electrolytes/imaging/ECG/echo/PFT that affect post-op care
+6. 감기 유무 — recent URI symptoms and their timing (raises post-op respiratory risk)
+If several groups have findings, combine them into one sentence rather than exceeding 5 sentences.
+
+QUANTIFY VITAL ABNORMALITIES. For every vital abnormality you report, state HOW LONG it lasted and
+HOW FAR it deviated from the threshold (nadir/peak value) — not merely that it occurred. The
+INTRAOPERATIVE VITAL SUMMARY block already gives you the duration and the nadir/peak; carry them
+over. "저혈압" alone is insufficient; "20분간 저혈압(최저 55mmHg)" is correct. Events marked ⚑ in
+that block are the clinically significant ones and must appear.
+
+Pediatric airway, fluids, and drug sensitivity are especially important.
 ```
+
+> **필수 항목군 6개**는 [docs/REQUIRED_CATEGORIES.md](docs/REQUIRED_CATEGORIES.md)에 정의·근거가 있고,
+> 코드 단일 출처는 [pipeline_v3/required_categories.py](pipeline_v3/required_categories.py)다.
+> **조건부 필수** — 소견이 있는 군만 쓰고, 없는 군은 "없음"조차 쓰지 않는다(brevity 축 보호).
 
 ### USER PROMPT (`build_user_prompt`)
 
@@ -54,8 +73,14 @@ Using the EMR below, generate an ultra-brief PACU/ICU handoff.
 - If there ARE issues, output 1-5 very short sentences in formal Korean.
 - Do NOT include normal findings, routine or administrative details, or any request to re-check intraoperative events.
 
-Focus only on post-op relevant abnormalities: airway/respiratory status, hemodynamics/bleeding/transfusion,
-major or congenital disease, intra-op events already recorded, drug effects, lines/devices, and cooperation/agitation risk.
+필수 항목군 — 아래 6군 중 EMR에 이상 소견이 있는 군은 하나도 빠뜨리지 말고 전달하세요.
+소견이 없는 군은 아예 쓰지 마세요("없음"도 쓰지 않음).
+1) 기저질환·약물  2) 기도관리  3) 수술 중 이벤트 및 처치
+4) 수혈·수액  5) 수술 전 검사이상  6) 감기 유무
+
+바이탈 이상 소견은 **지속시간**과 **기준 대비 편차(최저/최고값)** 를 반드시 함께 쓰세요.
+"저혈압" (X) → "20분간 저혈압(최저 55mmHg)" (O). 아래 바이탈 요약의 ⚑ 표시 이벤트는
+임상적으로 유의하므로 빠뜨리지 마세요.
 
 ### EMR
 {emr_text}{vital_section}
@@ -159,8 +184,21 @@ Paraphrase is fine. Return a verdict for EVERY item id. Output strict JSON only.
 {"verdicts": [{"id":"c1","status":"yes|partial|no"}, ...]}
 ```
 
+- `{items}`의 각 줄은 `- c1 [기도관리]: 어려운 기도, 3회 시도 후 삽관` 형태로 **소속 필수 항목군**을
+  함께 제시한다 — judge가 그룹 맥락으로 판정하게 하기 위함.
+
 > 항목 id가 하나라도 verdict 누락되면 `verdict_missing`→`judge_failed`로 케이스 제외.
 > dev split은 케이스별 checklist가 없어 coverage 미측정(결과표 `—`).
+
+**항목군별 coverage** — `parse_coverage()`가 전체 coverage와 별개로 항목군 단위 recall을 낸다.
+
+```json
+"category_coverage": {"airway_management": {"n":2, "score":0.75, "missed":[], "label":"기도관리"}},
+"missed_categories": ["uri_status"]
+```
+
+`missed_categories`(그 군 항목을 **전부** 놓침)는 케이스 note에 `필수 항목군 전부 누락: 감기 유무`로
+남는다. composite은 낮추지 않는다 — 진단용 지표이며, 안전게이트로 승격할지는 전문의 검수 후 결정.
 
 ### 3-2. Faithfulness — [metrics.py:104](pipeline_v3/eval_v3/metrics.py#L104)
 
@@ -219,6 +257,10 @@ Output strict JSON only.
 - 불필요 내용(약 잔량 반납, 이송 문구, "환자 설명은 다음과 같습니다" 류)
 - 정상 지표의 지나치게 구체적인 설명
 
+감점하지 않는 것:
+- **이상** 바이탈에 붙은 지속시간·최저/최고 수치(예: "20분간 저혈압(최저 55mmHg)")
+  — 필수 정보이므로 장황함으로 보지 않는다.
+
 ### 모델 인계문 (구분자 안 텍스트만 채점 대상)
 {output}
 
@@ -250,9 +292,11 @@ QTc 연장·일시적 SpO2 저하 등 vital 파생 항목이 checklist를 오염
 - EMR은 약어 풀이와 source 인용에만 사용.
 - gold가 device만 언급하면 그 device를 low 항목 1개로, 나머지는 is_normal_case 판단.
 - gold가 사실상 '특이사항 없음'뿐이면 is_normal_case=true, items=[].
-- category: airway, respiratory, hemodynamics, bleeding_transfusion, congenital_major_disease,
-  intraop_event, drug_effect, lines_devices, cooperation_agitation, other
+- category는 반드시 아래 **필수 항목군** 6개 중 하나. 어디에도 안 맞으면 "other".
 - severity: high/medium/low. source: EMR 근거 원문(없으면 gold 인용).
+
+### 필수 항목군 (category 값)
+{categories}
 
 JSON만 출력:
 {"is_normal_case": <bool>, "items": [{"id":"c1","finding":"...","category":"...","severity":"...","source":"..."}]}
@@ -266,6 +310,11 @@ JSON만 출력:
 ### JSON
 ```
 
+- `{categories}`: [required_categories.prompt_block()](pipeline_v3/required_categories.py) — 6개 항목군의
+  id·라벨·설명이 그대로 삽입된다. 추출된 `category`는 `normalize_category()`로 정규화되고,
+  v1/v2 값(`airway`, `hemodynamics`, `bleeding_transfusion` …)은 `LEGACY_CATEGORY_MAP`으로
+  매핑되므로 **기존 gold_checklist JSON도 재추출 없이 읽힌다**.
+- 케이스마다 `required_categories`(그 gold가 실제로 다룬 항목군)가 checklist에 함께 기록된다.
 - gold가 비어 있으면 `no_gold`(수기 검수 대상), 추출 실패 시 `gold_llm_failed` — 둘 다 채점 불가로 케이스 제외.
 
 ---

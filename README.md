@@ -29,6 +29,10 @@ export LD_PRELOAD=$CONDA_PREFIX/lib/libstdc++.so.6
 + `gold_sampled/인계요약지_SY.xlsx` + **`preprocessed/khs_gold_remap.json`**
   (수술ID remap — PHI라서 repo에 없음; 기존 작업 PC의 `data/preprocessed/`에서 복사).
 
+> **v3.1 재실행 중이라면 [docs/RERUN_RUNBOOK.md](docs/RERUN_RUNBOOK.md) 를 따르세요.**
+> 임계값·프롬프트·gold가 모두 바뀌어서 아래 순서를 `--skip_done` 으로 그냥 돌리면
+> 옛 산출물(특히 `vital_summary_map.pkl`)을 재사용해 조용히 틀린 결과가 나옵니다.
+
 ## 실행 순서 (요약 — 상세는 PIPELINE_V3.md §6)
 
 ```bash
@@ -82,18 +86,41 @@ raw / rlaif_dpo / rlaif_simpo / sft_1ep / sft_3ep / sft_1ep_dpo / sft_3ep_dpo
   ② repo private 전환 또는 `git filter-repo`로 과거 이력의 수술ID 스크럽
   (이력에 이미 push된 P0-3 항목은 새 커밋으로는 지워지지 않는다).
 
-## 바이탈 threshold 출처 (v1에서 유지)
+## 바이탈 threshold (v3.1 — 교과서 근거로 전면 재설정)
 
-| 항목       | 기준                      | 출처                    |
-| ---------- | ------------------------- | ----------------------- |
-| HR         | 연령별 서맥/빈맥          | 대한소아청소년과학회    |
-| SBP 저혈압 | 70+2×age(yr)             | PALS/ATLS               |
-| SBP 고혈압 | 연령별 95th pct           | 대한소아청소년학회 2008 |
-| MBP 저혈압 | 1.5×age(yr)+40           | PMID 17273118           |
-| DBP 저/고  | 연령별 5th/90th pct       | AAP 4th Report          |
-| QTc        | <8세 >450ms, ≥8세 >460ms | PMID 16482041           |
-| SpO2       | <95% / <90%               | —                      |
-| T1         | <35.5°C / >38.0°C       | —                      |
+전거는 **Smith's Anesthesia for Infants and Children 9e (2021)** 와
+**Miller's Anesthesia 10e (2024)**. 표·페이지 단위 근거와 v1 대비 변경 내역은
+**[docs/THRESHOLDS.md](docs/THRESHOLDS.md)**, 코드 단일 출처는
+[utils/vital_thresholds.py](utils/vital_thresholds.py).
+
+판정은 **2-tier** — `⚑`(소생·개입 기준 초과 = 임상적 유의) / 표시 없음(연령별 참조범위 이탈).
+
+| 항목 | 유의(`⚑`) 기준 | 정상범위 기준 | 전거 |
+|---|---|---|---|
+| HR | 서맥 <60 · 빈맥 >220/190/180/150 | 연령별 mean±2SD (9구간) | Smith Table 57.3 / Table 18.1 |
+| SBP | 신생아<60·영아<70·1–10세<70+2×age·>10세<90 | 고혈압 = 95th pct 초과 | Smith Table 57.3 / Table 18.2 |
+| MBP | `min(1.5×age+40, 65)` 미만 | — | 관례식 + Miller Ch.4 (MAP<65) |
+| DBP | — (하한 기준 문헌 없음 → 판정 안 함) | 고혈압 = 95th pct 초과 | Smith Table 18.3 |
+| SpO2 | <90% | 목표미달 90–93% (목표 94–99%) | Smith Ch.57 |
+| T1 | <35.5°C · >38.0°C | 저체온 <36.0 · 안전범위 초과 >37.5 | Smith Ch.21 / Ch.7 |
+| QTc | >480 ms | 정상상한 초과 >470(신생아)/>440 | Miller / Smith Ch.5 |
+| UO | 핍뇨 <0.5 mL/kg/hr | — | Miller Ch.24 |
+| EBL | >10% EBV · >50% EBV | — | Smith Table 21.6 / Ch.18 |
+| Ppeak | — (소아 일반마취 기준 문헌 없음 → 판정 안 함) | — | — |
+
+> 교과서 PDF는 `docs/references/`에 두되 저작권 때문에 gitignore 처리했다.
+
+## 인계문 필수 항목군
+
+인계문이 반드시 다뤄야 할 6개 항목군 — 정의·근거는
+**[docs/REQUIRED_CATEGORIES.md](docs/REQUIRED_CATEGORIES.md)**, 코드 단일 출처는
+[pipeline_v3/required_categories.py](pipeline_v3/required_categories.py).
+
+기저질환·약물 / 기도관리 / 수술 중 이벤트 및 처치 / 수혈·수액 / 수술 전 검사이상 / 감기 유무
+
+**조건부 필수** — EMR에 소견이 있는 군은 반드시 전달하고, 없는 군은 "없음"조차 쓰지 않는다
+(brevity 축과 `특이사항 없음` 규칙 보호). 생성 프롬프트·checklist 추출·coverage 채점 세 곳에
+동시에 반영돼 있고, coverage는 항목군별 recall(`category_coverage` / `missed_categories`)을 함께 낸다.
 
 ## IRB / DRB
 

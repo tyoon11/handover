@@ -64,6 +64,9 @@ GOLD_SY_XLSX = DATA_DIR / "gold_sampled" / "인계요약지_SY.xlsx"     # 전�
 
 # 수술ID remap (PHI — repo 금지, 데이터 폴더 JSON에서 로드)
 KHS_REMAP_JSON = DATA_DIR / "preprocessed" / "khs_gold_remap.json"
+# 교수님 재검수본(output_케이스별_*_reviewed.xlsx)에서 확정된 GT — c10 위에 덮어쓴다.
+# scripts/import_khs_review.py → scripts/build_gold_override.py 로 생성. PHI.
+KHS_GOLD_OVERRIDE_JSON = DATA_DIR / "preprocessed" / "khs_gold_override.json"
 
 # ── 다린(기존 연구) 재추론 경로 (reinfer_darin_on_v3sids.py / report_v3 병기 공용) ──
 #   기본값은 handover BASE_DIR 의 형제 폴더 HANDOVER_인계용_다린. env 로 오버라이드 가능.
@@ -84,6 +87,15 @@ def load_khs_remap() -> dict:
                 for k, v in json.loads(KHS_REMAP_JSON.read_text(encoding="utf-8")).items()}
     except Exception:
         return {}
+
+
+def load_khs_gold_override() -> dict:
+    """{sid(str): 확정 GT(str)}. 파일 없으면 빈 dict — 기존 c10 gold 그대로 사용."""
+    try:
+        raw = json.loads(KHS_GOLD_OVERRIDE_JSON.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return {str(k): str(v).strip() for k, v in raw.items() if str(v).strip()}
 
 
 # ── 모델 레지스트리 (단일 소스 — 학습/추론/평가/다운로드가 전부 이걸 사용) ────

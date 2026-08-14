@@ -176,6 +176,7 @@ def _judge_pass(judge_key, records, backend, mode):
             continue
         cov = M.parse_coverage(cov_res.get(i), r["entry"]) if i in cov_res else \
             dict(coverage=None, covered=[], partial=[], missed=[],
+                 category_coverage={}, missed_categories=[],
                  judge_failed=False, reason="no_items")
         fa = M.parse_faithfulness(fa_res.get(i))
         br = M.parse_brevity(br_res.get(i))
@@ -202,7 +203,8 @@ def _official(per_judge: dict, allowed: list):
                   brevity=avg("brevity"), composite=avg("composite"),
                   gate=first.get("gate", ""), note=first.get("note", ""))
     # 상세 리스트(missed 등)는 첫 허용 judge 기준으로 첨부 (표시용)
-    for k in ("covered", "partial", "missed", "hallucinations", "noise"):
+    for k in ("covered", "partial", "missed", "hallucinations", "noise",
+              "category_coverage", "missed_categories"):
         out[k] = first.get(k, [])
     out["judges_used"] = list(use)
     return out

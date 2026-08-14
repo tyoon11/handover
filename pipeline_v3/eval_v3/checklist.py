@@ -25,8 +25,11 @@ checklist JSON 구조 (case_key = str(sid)):
 import json
 from pathlib import Path
 
-from ..config_v3 import is_no_issue_v3, load_khs_remap
+from ..config_v3 import is_no_issue_v3, load_khs_gold_override, load_khs_remap
 from ..prompt_utils import build_emr_text, get_sid, safe_get
+from ..required_categories import (
+    FALLBACK_CATEGORY, group_by_category, normalize_category, prompt_block,
+)
 
 
 # ── JSON I/O ────────────────────────────────────────────────────────────────
@@ -104,6 +107,21 @@ def load_khs_gold(xlsx_path, gold_df):
             draft_by_idx[draft_idx] = dr
     print(f"[checklist] KHS gold(c10) {len(gold_by_idx)}건, 원안(c9) {len(draft_by_idx)}건"
           + (f" (remap {n_remap}건)" if n_remap else ""))
+
+    # 재검수본에서 확정된 GT를 c10 위에 덮어쓴다 (있을 때만).
+    override = load_khs_gold_override()
+    if override:
+        n_ov, unknown = 0, []
+        for sid_s, text in override.items():
+            idx = sid_to_idx.get(int(sid_s))
+            if idx is None:
+                unknown.append(sid_s)
+                continue
+            gold_by_idx[idx] = text
+            n_ov += 1
+        print(f"[checklist] 교수님 재검수 GT 적용 {n_ov}건 (override)")
+        if unknown:
+            print(f"  ⚠ gold_df에 없는 sid {len(unknown)}건 무시: {unknown}")
     return gold_by_idx, draft_by_idx
 
 
@@ -127,9 +145,11 @@ _EXTRACT_TMPL = """아래 '교수님 gold 인계문'을 정답으로 삼아, 모
 - EMR은 약어 풀이와 source 인용에만 사용.
 - gold가 device만 언급하면 그 device를 low 항목 1개로, 나머지는 is_normal_case 판단.
 - gold가 사실상 '특이사항 없음'뿐이면 is_normal_case=true, items=[].
-- category: airway, respiratory, hemodynamics, bleeding_transfusion, congenital_major_disease,
-  intraop_event, drug_effect, lines_devices, cooperation_agitation, other
+- category는 반드시 아래 **필수 항목군** 6개 중 하나. 어디에도 안 맞으면 "other".
 - severity: high/medium/low. source: EMR 근거 원문(없으면 gold 인용).
+
+### 필수 항목군 (category 값)
+{categories}
 
 JSON만 출력:
 {{"is_normal_case": <bool>, "items": [{{"id":"c1","finding":"...","category":"...","severity":"...","source":"..."}}]}}
@@ -165,7 +185,8 @@ def build_checklist(engine, gold_df, gold_refs: dict) -> dict:
             continue
 
         emr = build_emr_text(gold_df.iloc[idx])
-        prompts.append(_EXTRACT_TMPL.format(gold=gold, emr=emr))
+        prompts.append(_EXTRACT_TMPL.format(gold=gold, emr=emr,
+                                           categories=prompt_block()))
         idxs.append(idx)
         sids.append(sid)
         checklist[str(sid)] = base
@@ -187,12 +208,17 @@ def build_checklist(engine, gold_df, gold_refs: dict) -> dict:
                 items.append({
                     "id": it.get("id") or f"c{k + 1}",
                     "finding": fnd,
-                    "category": it.get("category", "other"),
+                    "category": normalize_category(it.get("category")),
                     "severity": it.get("severity", "medium"),
                     "source": str(it.get("source", "")).strip(),
                 })
         entry["items"] = items
         entry["is_normal_case"] = bool(is_normal and not items)
+        # 이 케이스에서 gold가 실제로 다룬 항목군 — coverage 그룹 채점의 분모
+        entry["required_categories"] = [
+            c for c, v in group_by_category(items).items()
+            if v and c != FALLBACK_CATEGORY
+        ]
         # 추출 실패(파싱 None) 또는 '항목 0개 + normal 아님'은 실패로 기록 (E3)
         if pj is None or (not items and not entry["is_normal_case"]):
             entry["source"] = "gold_llm_failed"

@@ -20,6 +20,8 @@ __pycache__/
 *.xlsx
 *.csv
 outputs/
+outputs_v3/
+output_*
 models/
 checkpoints/
 
@@ -40,3 +42,7 @@ logs_*/
 
 # ── 인계용 패키지 (EDA 노트북에 실제 수술ID 포함 — PHI) ───────────
 HANDOVER_인계용_다린/
+
+# ── 참고 교과서 원본 (저작권 — 절대 커밋 금지, 로컬 참조 전용) ────
+docs/references/
+*.pdf

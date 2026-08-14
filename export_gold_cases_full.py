@@ -166,49 +166,85 @@ def _b(ws, r, c1, c2, fill=None, font=None, al=None):
         if al: cell.alignment = al
 
 
+# 나이 대표값 — 임계값 표를 vital_thresholds에서 직접 뽑아 쓰기 위한 샘플 연령.
+# 표를 손으로 적어두면 임계값 개정 때 검토용 산출물만 옛 값으로 남는 사고가 난다.
+_TH_AGES = [("신생아\n(14일)", 14 / 365.0), ("영아\n(6개월)", 0.5),
+            ("유아\n(2세)", 2.0), ("학령전\n(4세)", 4.0),
+            ("학령기\n(7세)", 7.0), ("학령기\n(10세)", 10.0),
+            ("청소년\n(14세)", 14.0)]
+
+
+def _th_rows():
+    """vital_thresholds 실제 함수로 연령군별 임계값 행 생성."""
+    import utils.vital_thresholds as T
+    ages = [a for _, a in _TH_AGES]
+    hr_n = [T.hr_normal_range(a) for a in ages]
+    hr_c = [T.hr_critical_range(a) for a in ages]
+    return [
+        ("HR 정상범위 (bpm)", *[f"{lo:.0f}–{hi:.0f}" for lo, hi in hr_n]),
+        ("HR ⚑서맥 < / ⚑빈맥 > (bpm)", *[f"{b:.0f} / {t:.0f}" for b, t in hr_c]),
+        ("SBP ⚑저혈압 < (mmHg)", *[f"{T.sbp_hypotension(a):.0f}" for a in ages]),
+        ("SBP 고혈압 > (mmHg)", *[f"{T.sbp_hypertension(a):.0f}" for a in ages]),
+        ("MBP ⚑저혈압 < (mmHg)", *[f"{T.map_hypotension(a):.0f}" for a in ages]),
+        ("DBP 고 > (mmHg)", *[f"{T.dbp_hypertension(a):.0f}" for a in ages]),
+        ("QTc 정상상한 > (ms)", *[f"{T.qtc_upper_normal(a):.0f}" for a in ages]),
+        ("EBV (mL/kg)", *[f"{T.estimated_blood_volume_ml_per_kg(a):.0f}" for a in ages]),
+    ]
+
+
 def build_threshold_sheet(ws):
+    import utils.vital_thresholds as T
+    rows = _th_rows()
     ws.sheet_view.showGridLines = False
-    ws["A1"] = "소아 바이탈 임계값 (Threshold) — vital_summarizer.py 기준"
-    ws["A1"].font = Font(bold=True, size=14, color="1F3864"); ws.merge_cells("A1:F1")
+    ws["A1"] = ("소아 바이탈 임계값 (Threshold) — Smith's Anesthesia 2021 / "
+                "Miller's Anesthesia 2024 근거")
+    ws["A1"].font = Font(bold=True, size=14, color="1F3864"); ws.merge_cells("A1:G1")
     ws.row_dimensions[1].height = 26
-    ws.cell(3, 1, "■ 연령군별 임계값 (나이 = 수술당시나이)").font = Font(bold=True, size=11, color="1F3864")
-    hdr = ["항목", "<1세\n(infant)", "1–2세\n(toddler)", "3–5세\n(preschool)",
-           "6–11세\n(school)", "≥12세\n(adolescent)"]
-    for j, a in enumerate(hdr, 1): ws.cell(4, j, a)
-    _b(ws, 4, 1, 6, HDR, WB_, CTR); ws.row_dimensions[4].height = 36
-    t1 = [("HR  서맥 < / 빈맥 >  (bpm)", "100 / 160", "90 / 150", "80 / 140", "70 / 130", "60 / 110"),
-          ("SBP 고혈압 >  (mmHg)", "100", "104", "108", "116", "130"),
-          ("DBP 저 < / 고 >  (mmHg)", "30 / 65", "35 / 70", "38 / 72", "40 / 76", "45 / 82")]
-    for i, row in enumerate(t1):
+    ws.cell(3, 1, "■ 연령군별 임계값 (나이 = 수술당시나이) · ⚑ = 임상적으로 유의") \
+        .font = Font(bold=True, size=11, color="1F3864")
+    for j, a in enumerate(["항목"] + [lab for lab, _ in _TH_AGES], 1):
+        ws.cell(4, j, a)
+    _b(ws, 4, 1, 7, HDR, WB_, CTR); ws.row_dimensions[4].height = 36
+    for i, row in enumerate(rows):
         r = 5 + i
         for j, v in enumerate(row, 1): ws.cell(r, j, v)
-        _b(ws, r, 1, 6, ALT if i % 2 else None, None, CTR)
+        _b(ws, r, 1, 7, ALT if i % 2 else None, None, CTR)
         ws.cell(r, 1).font = BOLD
         ws.cell(r, 1).alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-        ws.row_dimensions[r].height = 26
-    ws.cell(9, 1, "■ 공식·고정 임계값 (연령 함수 / 고정값)").font = Font(bold=True, size=11, color="1F3864")
-    ws.cell(10, 1, "항목"); ws.cell(10, 2, "기준"); ws.cell(10, 6, "출처")
-    ws.merge_cells("B10:E10"); _b(ws, 10, 1, 6, HDR, WB_, CTR); ws.row_dimensions[10].height = 22
-    t2 = [("SBP 저혈압", "나이 <1: <70    ·    1–10세: < (70 + 2×나이)    ·    나이 >10: <90    (mmHg)", "PALS / ATLS"),
-          ("MBP 저혈압", "< (1.5×나이 + 40)    (mmHg)", "PMID 17273118"),
-          ("QTc 연장", "나이 <8: >450 ms    ·    나이 ≥8: >460 ms", "PMID 16482041"),
-          ("SpO2", "경고 <95%    ·    위험 <90%", "—"),
-          ("체온 (T1)", "저체온 <35.5 ℃    ·    발열 >38.0 ℃", "—"),
-          ("EBL / UO / Ppeak", "임계값 없음 — 수치 요약만 (UO는 mL/kg/hr 병기)", "—")]
+        ws.row_dimensions[r].height = 24
+
+    r0 = 5 + len(rows) + 1
+    ws.cell(r0, 1, "■ 고정 임계값 및 판정 제외 항목").font = Font(bold=True, size=11, color="1F3864")
+    ws.cell(r0 + 1, 1, "항목"); ws.cell(r0 + 1, 2, "기준"); ws.cell(r0 + 1, 7, "출처")
+    ws.merge_cells(start_row=r0 + 1, start_column=2, end_row=r0 + 1, end_column=6)
+    _b(ws, r0 + 1, 1, 7, HDR, WB_, CTR); ws.row_dimensions[r0 + 1].height = 22
+    t2 = [("SpO2", f"⚑<{T.SPO2_CRIT:.0f}%    ·    목표미달 {T.SPO2_CRIT:.0f}–"
+                   f"{T.SPO2_TARGET_LOW - 1:.0f}% (목표 94–99%)", "Smith Ch.57"),
+          ("체온 (T1)", f"⚑<{T.TEMP_SAFE_LOW} ℃  ·  저체온 <{T.TEMP_HYPOTHERMIA} ℃  ·  "
+                        f"안전범위 초과 >{T.TEMP_SAFE_HIGH} ℃  ·  ⚑발열 >{T.TEMP_FEVER} ℃",
+           "Smith Ch.21 / Ch.7"),
+          ("QTc 연장", f"⚑>{T.QTC_PROLONGED:.0f} ms (정상상한은 위 표)", "Miller / Smith Ch.5"),
+          ("UO 핍뇨", f"⚑< {T.UO_OLIGURIA} mL/kg/hr (실제 기록 경과시간 기준)", "Miller Ch.24"),
+          ("EBL", f"⚑유의 >{T.EBL_SIGNIFICANT_PCT:.0f}% EBV  ·  "
+                  f"⚑대량 >{T.EBL_MASSIVE_PCT:.0f}% EBV (체중 있을 때만)", "Smith Ch.18 / Table 21.6"),
+          ("DBP 하한 / Ppeak", "판정하지 않음 — 교과서에 소아 기준 없음 (수치 요약만)", "—")]
     for i, (item, crit, src) in enumerate(t2):
-        r = 11 + i
-        ws.cell(r, 1, item); ws.cell(r, 2, crit); ws.cell(r, 6, src)
-        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=5)
-        _b(ws, r, 1, 6, ALT if i % 2 else None, None, None)
+        r = r0 + 2 + i
+        ws.cell(r, 1, item); ws.cell(r, 2, crit); ws.cell(r, 7, src)
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
+        _b(ws, r, 1, 7, ALT if i % 2 else None, None, None)
         ws.cell(r, 1).font = BOLD; ws.cell(r, 1).alignment = LTOP
         ws.cell(r, 2).alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-        ws.cell(r, 6).alignment = CTR; ws.row_dimensions[r].height = 24
-    ws.cell(18, 1, "※ 나이 = 수술당시나이(세). 바이탈 값 0은 센서 미연결로 제외. "
-                   "각 케이스 '바이탈 요약'의 이벤트는 위 임계값으로 판정됨.")
-    ws.merge_cells("A18:F19")
-    ws.cell(18, 1).font = Font(italic=True, color="7F7F7F")
-    ws.cell(18, 1).alignment = Alignment(wrap_text=True, vertical="top")
-    for col, w in zip("ABCDEF", [24, 18, 18, 18, 16, 16]): ws.column_dimensions[col].width = w
+        ws.cell(r, 7).alignment = CTR; ws.row_dimensions[r].height = 24
+    rn = r0 + 2 + len(t2) + 1
+    ws.cell(rn, 1, "※ 나이 = 수술당시나이(세). 바이탈 값 0은 센서 미연결로 제외. "
+                   "각 케이스 '바이탈 요약'의 이벤트는 위 임계값으로 판정됨. "
+                   "표·페이지 단위 전거는 docs/THRESHOLDS.md 참고.")
+    ws.merge_cells(start_row=rn, start_column=1, end_row=rn + 1, end_column=7)
+    ws.cell(rn, 1).font = Font(italic=True, color="7F7F7F")
+    ws.cell(rn, 1).alignment = Alignment(wrap_text=True, vertical="top")
+    for col, w in zip("ABCDEFG", [26, 16, 16, 16, 16, 16, 18]):
+        ws.column_dimensions[col].width = w
 
 
 def build_case_sheet(ws, sid, src, mo, darin):
@@ -286,28 +322,39 @@ def build_case_sheet(ws, sid, src, mo, darin):
 
 
 # ── Markdown 출력 (복붙 친화 — EMR/GT/바이탈은 코드블록, 모델출력은 인용문) ──────
-THRESHOLD_MD = """## 바이탈 임계값 (Threshold) — vital_summarizer.py 기준
+def build_threshold_md() -> str:
+    """xlsx Threshold 시트와 같은 값을 vital_thresholds에서 뽑아 markdown으로."""
+    import utils.vital_thresholds as T
+    labs = [lab.replace("\n", " ") for lab, _ in _TH_AGES]
+    head = ("| 항목 | " + " | ".join(labs) + " |\n"
+            + "|---" * (len(labs) + 1) + "|\n")
+    body = "".join(
+        "| " + " | ".join(str(c).replace("<", "&lt;").replace(">", "&gt;")
+                          for c in row) + " |\n"
+        for row in _th_rows())
+    return f"""## 바이탈 임계값 (Threshold) — Smith's Anesthesia 2021 / Miller's Anesthesia 2024 근거
 
-### 연령군별 (나이 = 수술당시나이)
+⚑ = 소생·개입 기준 초과(임상적으로 유의) · 표시 없음 = 연령별 정상 참조범위 이탈
 
-| 항목 | <1세 (infant) | 1–2세 (toddler) | 3–5세 (preschool) | 6–11세 (school) | ≥12세 (adolescent) |
-|---|---|---|---|---|---|
-| HR 서맥&lt; / 빈맥&gt; (bpm) | 100 / 160 | 90 / 150 | 80 / 140 | 70 / 130 | 60 / 110 |
-| SBP 고혈압&gt; (mmHg) | 100 | 104 | 108 | 116 | 130 |
-| DBP 저&lt; / 고&gt; (mmHg) | 30 / 65 | 35 / 70 | 38 / 72 | 40 / 76 | 45 / 82 |
+### 연령별 (나이 = 수술당시나이)
 
-### 공식·고정 임계값
+임계값은 **연속 나이로 계산**된다. 아래는 괄호 안 **대표 나이**에서의 값이며, 실제 판정에는
+그 케이스의 나이가 그대로 쓰인다 (HR 정상범위는 Smith Table 18.1의 9개 원구간).
+
+{head}{body}
+### 고정 임계값 및 판정 제외 항목
 
 | 항목 | 기준 | 출처 |
 |---|---|---|
-| SBP 저혈압 | 나이&lt;1: &lt;70 · 1–10세: &lt;(70+2×나이) · 나이&gt;10: &lt;90 (mmHg) | PALS/ATLS |
-| MBP 저혈압 | &lt; (1.5×나이+40) (mmHg) | PMID 17273118 |
-| QTc 연장 | 나이&lt;8: &gt;450ms · 나이≥8: &gt;460ms | PMID 16482041 |
-| SpO2 | 경고 &lt;95% · 위험 &lt;90% | — |
-| 체온 T1 | 저체온 &lt;35.5℃ · 발열 &gt;38.0℃ | — |
-| EBL / UO / Ppeak | 임계값 없음 — 수치 요약만 (UO는 mL/kg/hr 병기) | — |
+| SpO2 | ⚑&lt;{T.SPO2_CRIT:.0f}% · 목표미달 {T.SPO2_CRIT:.0f}–{T.SPO2_TARGET_LOW - 1:.0f}% (목표 94–99%) | Smith Ch.57 |
+| 체온 T1 | ⚑&lt;{T.TEMP_SAFE_LOW}℃ · 저체온 &lt;{T.TEMP_HYPOTHERMIA}℃ · 안전범위 초과 &gt;{T.TEMP_SAFE_HIGH}℃ · ⚑발열 &gt;{T.TEMP_FEVER}℃ | Smith Ch.21 / Ch.7 |
+| QTc 연장 | ⚑&gt;{T.QTC_PROLONGED:.0f}ms (정상상한은 위 표) | Miller / Smith Ch.5 |
+| UO 핍뇨 | ⚑&lt; {T.UO_OLIGURIA} mL/kg/hr (실제 기록 경과시간 기준) | Miller Ch.24 |
+| EBL | ⚑유의 &gt;{T.EBL_SIGNIFICANT_PCT:.0f}% EBV · ⚑대량 &gt;{T.EBL_MASSIVE_PCT:.0f}% EBV (체중 있을 때만) | Smith Ch.18 / Table 21.6 |
+| DBP 하한 / Ppeak | 판정하지 않음 — 교과서에 소아 기준 없음 (수치 요약만) | — |
 
 ※ 나이 = 수술당시나이(세). 바이탈 값 0은 센서 미연결로 제외. 각 케이스 '바이탈 요약'의 이벤트는 위 임계값으로 판정됨.
+표·페이지 단위 전거는 `docs/THRESHOLDS.md`.
 """
 
 
@@ -320,7 +367,7 @@ def build_markdown(src, sids, mo, darin):
          "> ⚠ **PHI 포함** — 외부 공유·커밋 금지. gold checklist 미검수면 점수는 잠정치.",
          "> composite = 0.5·coverage + 0.3·faithfulness + 0.2·brevity  ·  "
          "안전게이트 missed_abnormal = 이상소견을 '특이사항 없음'으로 뭉갬 → composite 0\n",
-         THRESHOLD_MD]
+         build_threshold_md()]
     for sid in sids:
         s = src[sid]
         L.append(f"\n---\n\n## 수술 ID {sid}\n")

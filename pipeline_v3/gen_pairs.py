@@ -224,10 +224,14 @@ response to evaluate, and a score rubric are given.
 # T3 교정 핵심: '전부 놓치고 특이사항 없음'이 최고점이 되지 않도록 coverage 루브릭 신설
 _COVERAGE_RUBRIC = (
     "Clinical coverage (recall of actionable abnormal findings). "
-    "Score 5: mentions ALL clinically actionable abnormal findings present in the EMR/vitals "
-    "(airway events, hemodynamic instability, bleeding/transfusion, major or congenital disease, "
-    "intra-op events, critical lines/devices, drug effects). "
-    "Score 3: mentions the most critical findings but misses some. "
+    "Score 5: mentions ALL clinically actionable abnormal findings present in the EMR/vitals, "
+    "covering every one of the six mandatory groups that HAS a finding — comorbidity/medication, "
+    "airway management, intraoperative events and interventions, transfusion/fluids, abnormal "
+    "pre-op tests, recent URI (cold) status. Vital abnormalities must be QUANTIFIED with how long "
+    "they lasted and how far they deviated from the threshold (nadir/peak), e.g. "
+    "'20분간 저혈압(최저 55mmHg)'; a bare '저혈압' is incomplete. "
+    "Score 3: mentions the most critical findings but misses some, or reports vital abnormalities "
+    "without duration and nadir/peak. "
     "Score 1: says '특이사항 없음' despite clear abnormal findings in the EMR, or misses most. "
     "If the EMR truly has no meaningful abnormal findings, an exact '특이사항 없음' scores 5."
 )
@@ -235,7 +239,8 @@ _COVERAGE_RUBRIC = (
 _FIDELITY_BREVITY_RUBRIC = (
     "Fidelity and exception-based brevity. "
     "Score 5: every statement is supported by the EMR/vitals, only abnormal findings are "
-    "mentioned, in 1-5 short formal Korean sentences. "
+    "mentioned, in 1-5 short formal Korean sentences. Duration and nadir/peak numbers attached to "
+    "an ABNORMAL vital finding are required content, NOT verbosity — never penalize them. "
     "Score 3: minor unsupported details or mild verbosity. "
     "Score 1: fabricates findings not in the EMR, states r/o as confirmed, or is dominated by "
     "normal/routine/administrative content."

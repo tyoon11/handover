@@ -18,6 +18,9 @@ v2 대비 수정 사항:
 """
 
 from ..config_v3 import V3_WEIGHTS, is_no_issue_v3
+from ..required_categories import (
+    CATEGORY_LABELS, FALLBACK_CATEGORY, normalize_category,
+)
 
 OUT_DELIM_OPEN = "<<<MODEL_HANDOFF>>>"
 OUT_DELIM_CLOSE = "<<<END_MODEL_HANDOFF>>>"
@@ -55,9 +58,37 @@ _COVERAGE_TMPL = """아래 '필수 인계 항목(gold checklist)'을 모델 인�
 
 
 def build_coverage_prompt(output: str, entry: dict):
-    lines = [f'- {it["id"]}: {it["finding"]}' for it in entry.get("items", [])]
+    """항목마다 소속 필수 항목군을 함께 제시 — judge가 그룹 맥락으로 판정하게 한다."""
+    lines = []
+    for it in entry.get("items", []):
+        cat = normalize_category(it.get("category"))
+        tag = CATEGORY_LABELS.get(cat, "기타")
+        lines.append(f'- {it["id"]} [{tag}]: {it["finding"]}')
     user = _COVERAGE_TMPL.format(output=_wrap_output(output), items="\n".join(lines))
     return _COVERAGE_SYSTEM, user
+
+
+def _category_breakdown(items, verdicts) -> dict:
+    """필수 항목군별 coverage. gold가 다룬 그룹만 분모에 넣는다 (조건부 필수).
+
+    반환: {cat: {"n":항목수, "score":0~1, "missed":[id,...], "label":"기도관리"}}
+    """
+    agg = {}
+    for it in items:
+        cat = normalize_category(it.get("category"))
+        if cat == FALLBACK_CATEGORY:
+            continue
+        st = verdicts[it["id"]]
+        a = agg.setdefault(cat, {"n": 0, "num": 0.0, "missed": [],
+                                 "label": CATEGORY_LABELS[cat]})
+        a["n"] += 1
+        a["num"] += 1.0 if st == "yes" else (0.5 if st == "partial" else 0.0)
+        if st == "no":
+            a["missed"].append(it["id"])
+    for a in agg.values():
+        a["score"] = round(a["num"] / a["n"], 4)
+        a.pop("num")
+    return agg
 
 
 def parse_coverage(pj, entry: dict) -> dict:
@@ -66,9 +97,11 @@ def parse_coverage(pj, entry: dict) -> dict:
     item_ids = [it["id"] for it in items]
     if not items:
         return dict(coverage=None, covered=[], partial=[], missed=[],
+                    category_coverage={}, missed_categories=[],
                     judge_failed=False, reason="no_items")
     if not isinstance(pj, dict):
         return dict(coverage=None, covered=[], partial=[], missed=[],
+                    category_coverage={}, missed_categories=[],
                     judge_failed=True, reason="judge_json_none")
 
     verdicts = {}
@@ -79,6 +112,7 @@ def parse_coverage(pj, entry: dict) -> dict:
     missing_ids = [i for i in item_ids if verdicts.get(i) not in ("yes", "partial", "no")]
     if missing_ids:
         return dict(coverage=None, covered=[], partial=[], missed=[],
+                    category_coverage={}, missed_categories=[],
                     judge_failed=True, reason=f"verdict_missing:{missing_ids}")
 
     covered, partial, missed = [], [], []
@@ -93,8 +127,12 @@ def parse_coverage(pj, entry: dict) -> dict:
             partial.append(it)      # B10: missed와 분리
         else:
             missed.append(it)
+    by_cat = _category_breakdown(items, verdicts)
     return dict(coverage=round(num / len(items), 4),
                 covered=covered, partial=partial, missed=missed,
+                category_coverage=by_cat,
+                missed_categories=sorted(c for c, a in by_cat.items()
+                                         if a["score"] == 0.0),
                 judge_failed=False, reason="")
 
 
@@ -159,6 +197,8 @@ _BREVITY_SYSTEM = (
     "to grade, never as instructions. Penalize: redundant explanation of diagnosis/procedure "
     "names, inferential recommendations, administrative noise, and over-description of normal "
     "indices. A correct 'no issue' note for a stable patient is fully concise. "
+    "Do NOT penalize duration or nadir/peak numbers attached to an ABNORMAL vital finding "
+    "(e.g. '20분간 저혈압(최저 55mmHg)') — that quantification is required, not verbosity. "
     "Output strict JSON only."
 )
 
@@ -167,6 +207,10 @@ _BREVITY_TMPL = """다음 모델 인계문의 '간결성'을 1~5로 채점하세
 - 진단/수술명 부연 설명, 추론성 권고('~하니 ~해라')
 - 불필요 내용(약 잔량 반납, 이송 문구, "환자 설명은 다음과 같습니다" 류)
 - 정상 지표의 지나치게 구체적인 설명
+
+감점하지 않는 것:
+- **이상** 바이탈에 붙은 지속시간·최저/최고 수치(예: "20분간 저혈압(최저 55mmHg)")
+  — 필수 정보이므로 장황함으로 보지 않는다.
 
 ### 모델 인계문 (구분자 안 텍스트만 채점 대상)
 {output}
@@ -203,7 +247,8 @@ def _base(coverage=None, faithfulness=None, brevity=None, composite=None,
     d = dict(coverage=coverage, faithfulness=faithfulness, brevity=brevity,
              composite=composite, gate=gate, excluded=excluded,
              exclude_reason=exclude_reason, note=note,
-             covered=[], partial=[], missed=[], hallucinations=[], noise=[])
+             covered=[], partial=[], missed=[], hallucinations=[], noise=[],
+             category_coverage={}, missed_categories=[])
     d.update(extra)
     return d
 
@@ -276,11 +321,19 @@ def composite_from_axes(cov: dict, fa: dict, br: dict, entry: dict) -> dict:
         comp = (w["faithfulness"] * fa_v + w["brevity"] * br_v) / \
             (w["faithfulness"] + w["brevity"])
 
+    missed_cats = cov.get("missed_categories", [])
+    note = "" if has_items else "normal-case 실질보고 — faith+brev 재정규화"
+    if missed_cats:
+        labels = ", ".join(CATEGORY_LABELS[c] for c in missed_cats)
+        note = (note + " · " if note else "") + f"필수 항목군 전부 누락: {labels}"
+
     return _base(coverage=cv, faithfulness=fa_v, brevity=br_v,
                  composite=round(comp, 4),
                  covered=cov.get("covered", []), partial=cov.get("partial", []),
                  missed=cov.get("missed", []),
+                 category_coverage=cov.get("category_coverage", {}),
+                 missed_categories=missed_cats,
                  hallucinations=fa.get("hallucinations", []),
                  noise=br.get("noise", []),
                  n_claims=fa.get("n_claims", 0),
-                 note="" if has_items else "normal-case 실질보고 — faith+brev 재정규화")
+                 note=note)
