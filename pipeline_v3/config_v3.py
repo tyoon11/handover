@@ -230,6 +230,8 @@ INFER_CONFIG = dict(
 # ── 선호쌍 생성 (T1/T2/T3/T8) ───────────────────────────────────────────────
 PAIRGEN = dict(
     n_fewshot=2,                 # few-shot 예시 수 (held-out pool에서 행별 로테이션)
+    fewshot_emr_chars=700,       # 예시 EMR 앞부분 길이(자) — 스타일 앵커 목적이라 짧아도 충분.
+                                 # 지시문+few-shot이 MAX_PROMPT_TOKENS를 넘으면 여기부터 줄인다.
     temperature=0.8,             # 후보 다양화 (greedy 1개 + 샘플 K개)
     top_p=0.95,
     n_samples=3,                 # 모델당 temperature 샘플 수 (greedy 포함 후보 = 1+3)

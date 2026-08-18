@@ -96,22 +96,19 @@ RULES:
 - NEVER include normal/stable findings, routine vitals, surgery steps, administrative drug info, or transfer phrases.
 - NO lists, NO explanations, NO repetition.
 
-MANDATORY CHECK — go through these six groups and report EVERY one that has an abnormal
-finding in the EMR. Omitting a group that HAS a finding is the worst possible error.
-Do NOT write anything for a group that has no finding.
-1. 기저질환·약물 — major/congenital disease, comorbidity, drugs given and their post-op effect, allergy
-2. 기도관리 — ETT/LMA and size, difficult airway, extubation status, laryngospasm/bronchospasm/croup, O2 need
-3. 수술 중 이벤트 및 처치 — hypotension/bradycardia/arrhythmia/desaturation/hypothermia and what was done, lines/devices
-4. 수혈·수액 — blood loss, transfused products, total fluids, urine output, volume status at the end
-5. 수술 전 검사이상 — abnormal pre-op labs/coagulation/electrolytes/imaging/ECG/echo/PFT that affect post-op care
-6. 감기 유무 — recent URI symptoms and their timing (raises post-op respiratory risk)
-If several groups have findings, combine them into one sentence rather than exceeding 5 sentences.
+REPORT EVERY ONE of these six groups that has an abnormal finding; write nothing for a group
+that has none. Omitting a group that HAS a finding is the worst possible error.
+1 기저질환·약물 (comorbidity, drugs and post-op effect, allergy)
+2 기도관리 (ETT/LMA size, difficult airway, extubation, laryngospasm/bronchospasm/croup, O2 need)
+3 수술 중 이벤트 및 처치 (events and what was done, lines/devices)
+4 수혈·수액 (blood loss, products, fluids, urine output)
+5 수술 전 검사이상 (abnormal pre-op labs/ECG/echo/PFT affecting post-op care)
+6 감기 유무 (recent URI and its timing)
+Combine groups into one sentence rather than exceeding 5 sentences.
 
-QUANTIFY VITAL ABNORMALITIES. For every vital abnormality you report, state HOW LONG it lasted and
-HOW FAR it deviated from the threshold (nadir/peak value) — not merely that it occurred. The
-INTRAOPERATIVE VITAL SUMMARY block already gives you the duration and the nadir/peak; carry them
-over. "저혈압" alone is insufficient; "20분간 저혈압(최저 55mmHg)" is correct. Events marked ⚑ in
-that block are the clinically significant ones and must appear.
+QUANTIFY vital abnormalities: state how long each lasted and its nadir/peak vs threshold, taken
+from the vital summary. "저혈압" is insufficient; "20분간 저혈압(최저 55mmHg)" is correct.
+Events marked ⚑ there are clinically significant and must appear.
 
 Pediatric airway, fluids, and drug sensitivity are especially important."""
 
@@ -128,14 +125,9 @@ def build_user_prompt(emr_text: str, vital_summary: str = "") -> str:
 - If there ARE issues, output 1-5 very short sentences in formal Korean.
 - Do NOT include normal findings, routine or administrative details, or any request to re-check intraoperative events.
 
-필수 항목군 — 아래 6군 중 EMR에 이상 소견이 있는 군은 하나도 빠뜨리지 말고 전달하세요.
-소견이 없는 군은 아예 쓰지 마세요("없음"도 쓰지 않음).
-1) 기저질환·약물  2) 기도관리  3) 수술 중 이벤트 및 처치
-4) 수혈·수액  5) 수술 전 검사이상  6) 감기 유무
-
-바이탈 이상 소견은 **지속시간**과 **기준 대비 편차(최저/최고값)** 를 반드시 함께 쓰세요.
-"저혈압" (X) → "20분간 저혈압(최저 55mmHg)" (O). 아래 바이탈 요약의 ⚑ 표시 이벤트는
-임상적으로 유의하므로 빠뜨리지 마세요.
+필수 6군(기저질환·약물 / 기도관리 / 수술 중 이벤트 및 처치 / 수혈·수액 /
+수술 전 검사이상 / 감기 유무) 중 이상 소견이 있는 군은 빠뜨리지 마세요.
+바이탈 이상은 지속시간과 최저/최고값을 함께: "20분간 저혈압(최저 55mmHg)".
 
 ### EMR
 {emr_text}{vital_section}

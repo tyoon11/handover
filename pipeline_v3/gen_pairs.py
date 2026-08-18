@@ -69,7 +69,7 @@ def fewshot_block_for_row(bank: list, row_idx: int, n_shot: int) -> str:
     for i, bi in enumerate(picks, 1):
         ex = bank[int(bi)]
         # 예시 EMR은 앞부분만 (예산 절약 — 스타일 앵커 목적이므로 충분)
-        emr_head = ex["emr"][:1500]
+        emr_head = ex["emr"][:PAIRGEN["fewshot_emr_chars"]]
         parts.append(f"\nExample {i}\n**EMR(요약)**\n{emr_head}\n"
                      f"**PACU/ICU Handoff**\n{ex['handoff']}\n--")
     return "\n".join(parts)
