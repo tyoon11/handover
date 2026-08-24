@@ -21,7 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas as pd      # noqa: E402
 
 from pipeline_v3.config_v3 import EMR_PKL, VITAL_MAP_PKL, VITAL_PKL   # noqa: E402
-from utils.vital_summarizer import build_vital_map, summarize_vitals  # noqa: E402
+from utils.vital_summarizer import (                      # noqa: E402
+    DROPPED_ARTIFACTS, build_vital_map, summarize_vitals,
+)
 
 
 def main():
@@ -60,6 +62,11 @@ def main():
     n_dur = sum(1 for v in vital_map.values() if "분," in v or "시간," in v)
     print(f"\n[check] ⚑ 유의 이벤트 포함 {n_crit}/{len(vital_map)}건 · "
           f"지속시간 표기 포함 {n_dur}/{len(vital_map)}건")
+    if DROPPED_ARTIFACTS:
+        print(f"[check] 측정오류로 배제한 표본: {DROPPED_ARTIFACTS}")
+        print("        (DHCA 저체온·청색성 SpO2 같은 '극단이지만 실제' 값은 보존됨)")
+    else:
+        print("[check] 측정오류 배제 0건")
     if not n_crit:
         print("  ⚠ ⚑ 이벤트가 0건 — 임계값 반영 여부를 확인하세요")
 

@@ -32,6 +32,7 @@ from config import (
 
 from utils.vital_thresholds import (      # noqa: E402
     AGE_GROUP_LABELS,
+    implausible_mask,
     DBP_HAS_LOWER_THRESHOLD,
     EBL_MASSIVE_PCT,
     EBL_SIGNIFICANT_PCT,
@@ -85,11 +86,25 @@ def _load_sub(vital_df: pd.DataFrame, sid: int) -> pd.DataFrame:
     return sub
 
 
+DROPPED_ARTIFACTS = {}      # {item: n} — 마지막 summarize 호출의 배제 건수 (진단용)
+
+
 def _series(sub: pd.DataFrame, item: str) -> pd.Series:
-    """항목 이름 → 정제된 numeric 시계열."""
+    """항목 이름 → 정제된 numeric 시계열 (측정 오류 배제 포함).
+
+    센서 이탈로만 설명되는 값을 버린다. 임상적으로 극단적이지만 가능한 값
+    (DHCA 저체온 18–20°C, 청색성 심질환 SpO2 40–70%)은 **보존**한다 —
+    그게 바로 인계해야 할 소견이다. 배제 건수는 DROPPED_ARTIFACTS에 남긴다.
+    """
     rows = sub[sub["_item"] == item].sort_values(VIT_TIME_COL).copy()
     rows[VIT_VAL_COL] = _to_numeric(rows[VIT_VAL_COL])
     rows = rows.dropna(subset=[VIT_VAL_COL])
+    if not rows.empty:
+        bad = implausible_mask(item, rows[VIT_VAL_COL])
+        n_bad = int(bad.sum())
+        if n_bad:
+            DROPPED_ARTIFACTS[item] = DROPPED_ARTIFACTS.get(item, 0) + n_bad
+            rows = rows[~bad]
     return rows.set_index(VIT_TIME_COL)[VIT_VAL_COL]
 
 

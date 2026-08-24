@@ -51,7 +51,7 @@ os.environ["HANDOVER_RUN_ID"] = _RID
 print(f"[RUN v3] HANDOVER_RUN_ID={_RID}")
 
 from .config_v3 import (       # noqa: E402
-    EVAL_OUT, GEMMA4_BASES, GOLD_CHECKLIST_JSON, INFER_OUT, OUTPUT_BASE, PAIRS_OUT,
+    EVAL_OUT, GOLD_CHECKLIST_JSON, INFER_OUT, OUTPUT_BASE, PAIRS_OUT,
     PAIRS_SFT_PKL, PROVENANCE_JSON, RLAIF_OUT, SFT_OUT, TRAIN_KEYS, ensure_dir,
     infer_engine_for, model_path,
 )
@@ -134,10 +134,21 @@ PY = sys.executable
 
 
 def _train_env(model):
-    """gemma 계열 학습은 비동기 CUDA 스트림 race(AccumulateGrad stream mismatch)로
-    cudaErrorLaunchFailure가 간헐 발생 → 자식에 CUDA_LAUNCH_BLOCKING=1 주입해 직렬화(결과 동일).
-    torch 2.11/transformers 5.8 + gemma4 + device_map + grad-checkpoint 조합 이슈."""
-    return {"CUDA_LAUNCH_BLOCKING": "1"} if model in GEMMA4_BASES else None
+    """학습 자식 프로세스에 CUDA_LAUNCH_BLOCKING=1 주입 (결과 동일, 속도만 손해).
+
+    비동기 CUDA 스트림 race(AccumulateGrad stream mismatch)로 loss 계산 중
+    `cudaErrorLaunchFailure: unspecified launch failure`가 **간헐** 발생한다.
+    torch 2.11/transformers 5.8 + device_map + grad-checkpoint 조합 이슈.
+
+    처음엔 gemma4에서만 관측돼 GEMMA4_BASES 로 한정했는데, 260824 run 에서
+    llama·qwen SFT 가 같은 예외로 전멸(21변형 중 13종만 산출)했다. gemma4 만
+    살아남은 이유가 이 env 주입이었다 → **전 모델로 확대**한다.
+
+    끄고 싶으면 HANDOVER_NO_LAUNCH_BLOCKING=1 (재현성 대신 속도 선택).
+    """
+    if os.environ.get("HANDOVER_NO_LAUNCH_BLOCKING") == "1":
+        return None
+    return {"CUDA_LAUNCH_BLOCKING": "1"}
 
 
 def _sft_dir(model, ep):

@@ -20,7 +20,8 @@ __pycache__/
 *.xlsx
 *.csv
 outputs/
-outputs_v3/
+outputs*/
+old_outputs*/
 output_*
 models/
 checkpoints/
