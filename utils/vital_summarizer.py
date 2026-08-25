@@ -8,7 +8,7 @@ vital_summarizer.py — Rule-based Vital Sign Summarizer
 
 이벤트는 2-tier로 표기한다:
   - "정상범위 이탈" — 연령별 참조범위 밖 (통계적 이상)
-  - "⚑" 접두 — 소생·개입 기준 초과 (임상적으로 유의, 인계문에 반드시 포함)
+  - "[유의]" 접두 — 소생·개입 기준 초과 (인계문에 반드시 포함)
 """
 
 import sys as _sys
@@ -57,7 +57,7 @@ from utils.vital_thresholds import (      # noqa: E402
 
 warnings.filterwarnings("ignore")
 
-CRIT = "⚑"      # 임상적으로 유의한 이벤트 표시
+CRIT = "[유의]"   # 임상적으로 유의한 이벤트 표시 (특수문자 회피 — 토크나이저·엑셀 호환)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -124,7 +124,7 @@ def _stat(s: pd.Series, unit: str = "", digits: int = 0) -> str:
 
 
 def _events(evs) -> str:
-    """이벤트 목록 → 표기 문자열. 유의(⚑) 이벤트를 앞으로 정렬."""
+    """이벤트 목록 → 표기 문자열. 유의([유의]) 이벤트를 앞으로 정렬."""
     if not evs:
         return ", 이상 없음"
     evs = sorted(evs, key=lambda e: not e.startswith(CRIT))
@@ -161,7 +161,7 @@ def _ev(label: str, s: pd.Series, mask, thresh: float, *, low: bool,
     ([M] Ch.4가 술중저혈압을 'time or fraction of the case below threshold'로
     정량화하라고 권하는 방식). 연속 구간(episode)이 2개 이상이면 최장 구간도 적는다.
 
-    출력 예: `⚑저혈압(<70): 3회 15분(최장 10분), 최저 52 (기준-18)`
+    출력 예: `[유의]저혈압(<70): 3회 15분(최장 10분), 최저 52 (기준-18)`
     """
     m = pd.Series(mask, index=s.index).fillna(False).astype(bool)
     n = int(m.sum())

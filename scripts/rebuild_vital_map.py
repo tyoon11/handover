@@ -22,7 +22,7 @@ import pandas as pd      # noqa: E402
 
 from pipeline_v3.config_v3 import EMR_PKL, VITAL_MAP_PKL, VITAL_PKL   # noqa: E402
 from utils.vital_summarizer import (                      # noqa: E402
-    DROPPED_ARTIFACTS, build_vital_map, summarize_vitals,
+    CRIT, DROPPED_ARTIFACTS, build_vital_map, summarize_vitals,
 )
 
 
@@ -57,10 +57,10 @@ def main():
         for sid in list(vital_map)[:args.sample]:
             print(f"\n--- sid={sid} ---\n{vital_map[sid]}")
 
-    # 새 임계값이 실제로 반영됐는지 지표 — ⚑(유의) 이벤트가 하나도 없으면 의심
-    n_crit = sum(1 for v in vital_map.values() if "⚑" in v)
+    # 새 임계값이 실제로 반영됐는지 지표 — [유의] 이벤트가 하나도 없으면 의심
+    n_crit = sum(1 for v in vital_map.values() if CRIT in v)
     n_dur = sum(1 for v in vital_map.values() if "분," in v or "시간," in v)
-    print(f"\n[check] ⚑ 유의 이벤트 포함 {n_crit}/{len(vital_map)}건 · "
+    print(f"\n[check] {CRIT} 이벤트 포함 {n_crit}/{len(vital_map)}건 · "
           f"지속시간 표기 포함 {n_dur}/{len(vital_map)}건")
     if DROPPED_ARTIFACTS:
         print(f"[check] 측정오류로 배제한 표본: {DROPPED_ARTIFACTS}")
@@ -68,7 +68,7 @@ def main():
     else:
         print("[check] 측정오류 배제 0건")
     if not n_crit:
-        print("  ⚠ ⚑ 이벤트가 0건 — 임계값 반영 여부를 확인하세요")
+        print(f"  ⚠ {CRIT} 이벤트가 0건 — 임계값 반영 여부를 확인하세요")
 
     if not args.apply:
         print("\n[dry-run] 저장 안 함. 저장하려면 --apply")

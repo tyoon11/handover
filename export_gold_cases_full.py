@@ -182,10 +182,10 @@ def _th_rows():
     hr_c = [T.hr_critical_range(a) for a in ages]
     return [
         ("HR 정상범위 (bpm)", *[f"{lo:.0f}–{hi:.0f}" for lo, hi in hr_n]),
-        ("HR ⚑서맥 < / ⚑빈맥 > (bpm)", *[f"{b:.0f} / {t:.0f}" for b, t in hr_c]),
-        ("SBP ⚑저혈압 < (mmHg)", *[f"{T.sbp_hypotension(a):.0f}" for a in ages]),
+        ("HR [유의]서맥 < / [유의]빈맥 > (bpm)", *[f"{b:.0f} / {t:.0f}" for b, t in hr_c]),
+        ("SBP [유의]저혈압 < (mmHg)", *[f"{T.sbp_hypotension(a):.0f}" for a in ages]),
         ("SBP 고혈압 > (mmHg)", *[f"{T.sbp_hypertension(a):.0f}" for a in ages]),
-        ("MBP ⚑저혈압 < (mmHg)", *[f"{T.map_hypotension(a):.0f}" for a in ages]),
+        ("MBP [유의]저혈압 < (mmHg)", *[f"{T.map_hypotension(a):.0f}" for a in ages]),
         ("DBP 고 > (mmHg)", *[f"{T.dbp_hypertension(a):.0f}" for a in ages]),
         ("QTc 정상상한 > (ms)", *[f"{T.qtc_upper_normal(a):.0f}" for a in ages]),
         ("EBV (mL/kg)", *[f"{T.estimated_blood_volume_ml_per_kg(a):.0f}" for a in ages]),
@@ -200,7 +200,7 @@ def build_threshold_sheet(ws):
                 "Miller's Anesthesia 2024 근거")
     ws["A1"].font = Font(bold=True, size=14, color="1F3864"); ws.merge_cells("A1:G1")
     ws.row_dimensions[1].height = 26
-    ws.cell(3, 1, "■ 연령군별 임계값 (나이 = 수술당시나이) · ⚑ = 임상적으로 유의") \
+    ws.cell(3, 1, "■ 연령군별 임계값 (나이 = 수술당시나이) · [유의] = 임상적으로 유의") \
         .font = Font(bold=True, size=11, color="1F3864")
     for j, a in enumerate(["항목"] + [lab for lab, _ in _TH_AGES], 1):
         ws.cell(4, j, a)
@@ -218,15 +218,15 @@ def build_threshold_sheet(ws):
     ws.cell(r0 + 1, 1, "항목"); ws.cell(r0 + 1, 2, "기준"); ws.cell(r0 + 1, 7, "출처")
     ws.merge_cells(start_row=r0 + 1, start_column=2, end_row=r0 + 1, end_column=6)
     _b(ws, r0 + 1, 1, 7, HDR, WB_, CTR); ws.row_dimensions[r0 + 1].height = 22
-    t2 = [("SpO2", f"⚑<{T.SPO2_CRIT:.0f}%    ·    목표미달 {T.SPO2_CRIT:.0f}–"
+    t2 = [("SpO2", f"[유의]<{T.SPO2_CRIT:.0f}%    ·    목표미달 {T.SPO2_CRIT:.0f}–"
                    f"{T.SPO2_TARGET_LOW - 1:.0f}% (목표 94–99%)", "Smith Ch.57"),
-          ("체온 (T1)", f"⚑<{T.TEMP_SAFE_LOW} ℃  ·  저체온 <{T.TEMP_HYPOTHERMIA} ℃  ·  "
-                        f"안전범위 초과 >{T.TEMP_SAFE_HIGH} ℃  ·  ⚑발열 >{T.TEMP_FEVER} ℃",
+          ("체온 (T1)", f"[유의]<{T.TEMP_SAFE_LOW} ℃  ·  저체온 <{T.TEMP_HYPOTHERMIA} ℃  ·  "
+                        f"안전범위 초과 >{T.TEMP_SAFE_HIGH} ℃  ·  [유의]발열 >{T.TEMP_FEVER} ℃",
            "Smith Ch.21 / Ch.7"),
-          ("QTc 연장", f"⚑>{T.QTC_PROLONGED:.0f} ms (정상상한은 위 표)", "Miller / Smith Ch.5"),
-          ("UO 핍뇨", f"⚑< {T.UO_OLIGURIA} mL/kg/hr (실제 기록 경과시간 기준)", "Miller Ch.24"),
-          ("EBL", f"⚑유의 >{T.EBL_SIGNIFICANT_PCT:.0f}% EBV  ·  "
-                  f"⚑대량 >{T.EBL_MASSIVE_PCT:.0f}% EBV (체중 있을 때만)", "Smith Ch.18 / Table 21.6"),
+          ("QTc 연장", f"[유의]>{T.QTC_PROLONGED:.0f} ms (정상상한은 위 표)", "Miller / Smith Ch.5"),
+          ("UO 핍뇨", f"[유의]< {T.UO_OLIGURIA} mL/kg/hr (실제 기록 경과시간 기준)", "Miller Ch.24"),
+          ("EBL", f"[유의]유의 >{T.EBL_SIGNIFICANT_PCT:.0f}% EBV  ·  "
+                  f"[유의]대량 >{T.EBL_MASSIVE_PCT:.0f}% EBV (체중 있을 때만)", "Smith Ch.18 / Table 21.6"),
           ("DBP 하한 / Ppeak", "판정하지 않음 — 교과서에 소아 기준 없음 (수치 요약만)", "—")]
     for i, (item, crit, src) in enumerate(t2):
         r = r0 + 2 + i
@@ -334,7 +334,7 @@ def build_threshold_md() -> str:
         for row in _th_rows())
     return f"""## 바이탈 임계값 (Threshold) — Smith's Anesthesia 2021 / Miller's Anesthesia 2024 근거
 
-⚑ = 소생·개입 기준 초과(임상적으로 유의) · 표시 없음 = 연령별 정상 참조범위 이탈
+[유의] = 소생·개입 기준 초과(임상적으로 유의) · 표시 없음 = 연령별 정상 참조범위 이탈
 
 ### 연령별 (나이 = 수술당시나이)
 
@@ -346,11 +346,11 @@ def build_threshold_md() -> str:
 
 | 항목 | 기준 | 출처 |
 |---|---|---|
-| SpO2 | ⚑&lt;{T.SPO2_CRIT:.0f}% · 목표미달 {T.SPO2_CRIT:.0f}–{T.SPO2_TARGET_LOW - 1:.0f}% (목표 94–99%) | Smith Ch.57 |
-| 체온 T1 | ⚑&lt;{T.TEMP_SAFE_LOW}℃ · 저체온 &lt;{T.TEMP_HYPOTHERMIA}℃ · 안전범위 초과 &gt;{T.TEMP_SAFE_HIGH}℃ · ⚑발열 &gt;{T.TEMP_FEVER}℃ | Smith Ch.21 / Ch.7 |
-| QTc 연장 | ⚑&gt;{T.QTC_PROLONGED:.0f}ms (정상상한은 위 표) | Miller / Smith Ch.5 |
-| UO 핍뇨 | ⚑&lt; {T.UO_OLIGURIA} mL/kg/hr (실제 기록 경과시간 기준) | Miller Ch.24 |
-| EBL | ⚑유의 &gt;{T.EBL_SIGNIFICANT_PCT:.0f}% EBV · ⚑대량 &gt;{T.EBL_MASSIVE_PCT:.0f}% EBV (체중 있을 때만) | Smith Ch.18 / Table 21.6 |
+| SpO2 | [유의]&lt;{T.SPO2_CRIT:.0f}% · 목표미달 {T.SPO2_CRIT:.0f}–{T.SPO2_TARGET_LOW - 1:.0f}% (목표 94–99%) | Smith Ch.57 |
+| 체온 T1 | [유의]&lt;{T.TEMP_SAFE_LOW}℃ · 저체온 &lt;{T.TEMP_HYPOTHERMIA}℃ · 안전범위 초과 &gt;{T.TEMP_SAFE_HIGH}℃ · [유의]발열 &gt;{T.TEMP_FEVER}℃ | Smith Ch.21 / Ch.7 |
+| QTc 연장 | [유의]&gt;{T.QTC_PROLONGED:.0f}ms (정상상한은 위 표) | Miller / Smith Ch.5 |
+| UO 핍뇨 | [유의]&lt; {T.UO_OLIGURIA} mL/kg/hr (실제 기록 경과시간 기준) | Miller Ch.24 |
+| EBL | [유의]유의 &gt;{T.EBL_SIGNIFICANT_PCT:.0f}% EBV · [유의]대량 &gt;{T.EBL_MASSIVE_PCT:.0f}% EBV (체중 있을 때만) | Smith Ch.18 / Table 21.6 |
 | DBP 하한 / Ppeak | 판정하지 않음 — 교과서에 소아 기준 없음 (수치 요약만) | — |
 
 ※ 나이 = 수술당시나이(세). 바이탈 값 0은 센서 미연결로 제외. 각 케이스 '바이탈 요약'의 이벤트는 위 임계값으로 판정됨.

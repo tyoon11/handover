@@ -54,7 +54,7 @@ If several groups have findings, combine them into one sentence rather than exce
 QUANTIFY VITAL ABNORMALITIES. For every vital abnormality you report, state HOW LONG it lasted and
 HOW FAR it deviated from the threshold (nadir/peak value) — not merely that it occurred. The
 INTRAOPERATIVE VITAL SUMMARY block already gives you the duration and the nadir/peak; carry them
-over. "저혈압" alone is insufficient; "20분간 저혈압(최저 55mmHg)" is correct. Events marked ⚑ in
+over. "저혈압" alone is insufficient; "20분간 저혈압(최저 55mmHg)" is correct. Events marked [유의] in
 that block are the clinically significant ones and must appear.
 
 Pediatric airway, fluids, and drug sensitivity are especially important.
@@ -79,7 +79,7 @@ Using the EMR below, generate an ultra-brief PACU/ICU handoff.
 4) 수혈·수액  5) 수술 전 검사이상  6) 감기 유무
 
 바이탈 이상 소견은 **지속시간**과 **기준 대비 편차(최저/최고값)** 를 반드시 함께 쓰세요.
-"저혈압" (X) → "20분간 저혈압(최저 55mmHg)" (O). 아래 바이탈 요약의 ⚑ 표시 이벤트는
+"저혈압" (X) → "20분간 저혈압(최저 55mmHg)" (O). 아래 바이탈 요약의 [유의] 표시 이벤트는
 임상적으로 유의하므로 빠뜨리지 마세요.
 
 ### EMR

@@ -93,9 +93,9 @@ raw / rlaif_dpo / rlaif_simpo / sft_1ep / sft_3ep / sft_1ep_dpo / sft_3ep_dpo
 **[docs/THRESHOLDS.md](docs/THRESHOLDS.md)**, 코드 단일 출처는
 [utils/vital_thresholds.py](utils/vital_thresholds.py).
 
-판정은 **2-tier** — `⚑`(소생·개입 기준 초과 = 임상적 유의) / 표시 없음(연령별 참조범위 이탈).
+판정은 **2-tier** — `[유의]`(소생·개입 기준 초과 = 임상적 유의) / 표시 없음(연령별 참조범위 이탈).
 
-| 항목 | 유의(`⚑`) 기준 | 정상범위 기준 | 전거 |
+| 항목 | 유의(`[유의]`) 기준 | 정상범위 기준 | 전거 |
 |---|---|---|---|
 | HR | 서맥 <60 · 빈맥 >220/190/180/150 | 연령별 mean±2SD (9구간) | Smith Table 57.3 / Table 18.1 |
 | SBP | 신생아<60·영아<70·1–10세<70+2×age·>10세<90 | 고혈압 = 95th pct 초과 | Smith Table 57.3 / Table 18.2 |

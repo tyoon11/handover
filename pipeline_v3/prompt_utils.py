@@ -108,7 +108,7 @@ Combine groups into one sentence rather than exceeding 5 sentences.
 
 QUANTIFY vital abnormalities: state how long each lasted and its nadir/peak vs threshold, taken
 from the vital summary. "저혈압" is insufficient; "20분간 저혈압(최저 55mmHg)" is correct.
-Events marked ⚑ there are clinically significant and must appear.
+Events marked [유의] in that block are the clinically significant ones and must appear.
 
 Pediatric airway, fluids, and drug sensitivity are especially important."""
 
@@ -128,6 +128,7 @@ def build_user_prompt(emr_text: str, vital_summary: str = "") -> str:
 필수 6군(기저질환·약물 / 기도관리 / 수술 중 이벤트 및 처치 / 수혈·수액 /
 수술 전 검사이상 / 감기 유무) 중 이상 소견이 있는 군은 빠뜨리지 마세요.
 바이탈 이상은 지속시간과 최저/최고값을 함께: "20분간 저혈압(최저 55mmHg)".
+[유의] 표시된 이벤트는 반드시 포함하세요.
 
 ### EMR
 {emr_text}{vital_section}
