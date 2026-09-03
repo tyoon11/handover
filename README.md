@@ -56,6 +56,23 @@ python utils/download_models.py --probe --ca-bundle /etc/ssl/certs/ca-certificat
 토큰이 미검증 연결로 나가므로 신뢰된 병원망 안에서만. 대상 목록은
 `pipeline_v3/config_v3.py` 의 `MODELS` 가 단일 소스다.
 
+**TLS 를 통과했는데 대용량 샤드만 0바이트로 멈출 때** — TLS 문제와 별개의 증상이다.
+작은 파일(`config.json`·tokenizer)은 받아지는데 `*.safetensors` 의 `.incomplete` 가
+0바이트로 고정되고 `du` 가 안 늘면, 파일 종류에 따라 **호스트가 다른 것**이 원인이다:
+대용량은 Xet 스토리지(`cas-bridge`/`transfer.xethub.hf.co`)로 리다이렉트되고 자체 청크
+프로토콜을 써서 프록시를 잘 통과하지 못한다.
+
+프록시 env 가 감지되면 스크립트가 `HF_HUB_DISABLE_XET=1`(LFS CDN 경로로 우회)과
+`HF_HUB_DOWNLOAD_TIMEOUT=60`(HF 기본 10초는 프록시 경유 대용량에 짧아 조용한 재시도만
+반복된다)을 자동으로 건다. 그래도 멈추면 동시연결을 낮춘다:
+
+```bash
+python utils/download_models.py --models qwen35_122b --max-workers 2
+```
+
+`hf_transfer`(`HF_HUB_ENABLE_HF_TRANSFER=1`)는 쓰지 말 것 — Rust 다운로더가 자체 TLS
+루트를 써서 시스템 CA(병원 CA)를 보지 않는다.
+
 필요 데이터(서버 `DATA_DIR`에 있어야 함): v1과 동일한 pkl들
 (`gold_sampled_251008.pkl`, `jsft_251008.pkl`, `selfjudge_251008.pkl`, `rlhf_251008.pkl`,
 `vital_summary_map.pkl`) + `gold_sampled/인계요약지_gold_sampled_251002_KHS.xlsx`
