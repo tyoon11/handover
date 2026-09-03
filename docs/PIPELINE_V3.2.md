@@ -381,6 +381,56 @@ G9  gold 16 1회 개봉 + 최종 리포트  run_all_v3 --final
 G1~G4 중 하나라도 실패하면 다음 단계로 가지 않는다. 각 산출물에는 프롬프트 지문·split 해시·
 teacher/judge 키·양자화 포맷이 메타로 박힌다.
 
+## 8b. 폐쇄망 모델 보유 현황과 '로컬 구성' (2026-09-03)
+
+프록시가 `us.aws.cdn.hf.co` 를 차단해 teacher 3후보·`mprometheus`·`llama70b`(245GB)를 받지
+못하고 있다(§8c). 보유분만으로 파이프라인 전체가 돌아가므로 **역할을 env 로 교체해 지금
+진행**하고, 프록시가 열리면 목표 구성으로 되돌린다.
+
+| 역할 | 목표 구성 | **로컬 구성(현재 가능)** |
+|---|---|---|
+| teacher | `qwen35_122b` (78.9G, 미보유) | **`gemma4_31b`** (62.5G ✓) |
+| 쌍 judge | `prometheus` (93.4G ✓) | 동일 |
+| 평가 패널 | `medgemma27b` + `llama70b` + `mprometheus` | **`medgemma27b` + `qwen35` + `hari`** |
+| checklist 추출기 | `qwen35_122b` | `gemma4_31b` |
+| 학습 base | llama / qwen (+gemma4·hari·qwen35) | 동일 (base 6종 전부 ✓) |
+
+```bash
+export HANDOVER_TEACHER=gemma4_31b
+export HANDOVER_EVAL_JUDGES=medgemma27b,qwen35,hari
+export HANDOVER_CHECKLIST_EXTRACTOR=gemma4_31b
+```
+
+**순환 금지를 코드가 강제한다** — `config_v3.validate_roles()`:
+
+- 하드 실패: teacher ∈ 평가패널 / teacher == 쌍judge / 쌍judge ∈ 평가패널
+- 경고(LOO 보고 필수): 평가 judge 가 학습 대상이거나 같은 family, 패널 family 중복,
+  checklist 추출기 == 평가 judge
+
+`gemma4_31b` 를 teacher 로 쓰면서 패널에도 두는 실수를 이 검증이 잡는다(실제로 설계 중
+한 번 그렇게 쓸 뻔했다). `assert_models_available()` 는 스테이지 시작 시 미보유 모델을
+즉시 실패로 알린다 — 몇 시간 뒤 죽는 것을 막는다.
+
+**로컬 구성의 약점**: 패널이 gemma 1 + qwen 2 라 **qwen 계열 학습 대상이 유리해질 수 있다.**
+그래서 **dev 는 로컬 구성으로 진행(모델·설정 선택), gold 최종 평가는 목표 구성 확보 후**로
+미룬다. dev/gold 분리 원칙과 그대로 맞는다 — 재평가는 추론 산출물 재채점(수 시간)이고
+학습을 다시 하지 않는다.
+
+## 8c. HF 다운로드 차단 (프록시) — 진단 기록
+
+| 호스트 | 결과 |
+|---|---|
+| `huggingface.co` | 200 OK (API·소용량 정상) |
+| `cdn-lfs-us-1.hf.co` · `cas-bridge.xethub.hf.co` · `transfer.xethub.hf.co` | CONNECT 200 → CloudFront 403 = **도달 가능** |
+| **`us.aws.cdn.hf.co`** | **20초 무응답 · 4연결 모두 0바이트 (curl exit 28)** |
+
+대용량 파일은 전부 `us.aws.cdn.hf.co/xet-bridge-us/...` 로 302 되고, `HF_HUB_DISABLE_XET=1`
+으로도 목적지가 바뀌지 않는다(서버가 정한다). **클라이언트 우회는 없다** → 프록시 allowlist 에
+`*.hf.co` 추가가 필요하다. TLS 가로채기도 확인됐다
+(`issuer=forward-proxy (Seoul National University Hospital)`) — `--fix-certifi` 로 해결.
+
+진단: `python utils/download_models.py --probe --probe-cdn`
+
 ## 9. 적용 상태
 
 **코드 반영 완료 (2026-09-02)**
@@ -388,9 +438,10 @@ teacher/judge 키·양자화 포맷이 메타로 박힌다.
 | 항목 | 파일 |
 |---|---|
 | 프롬프트 전면 영어화 + 지문/동결 게이트 | `prompt_utils.py`, `required_categories.py`, `eval_v3/metrics.py`, `eval_v3/checklist.py`, `prompts_pairgen.py`(신규), `prompt_registry.py`(신규) |
-| teacher/judge 레지스트리 (`qwen72b`, `llama70b`) + 양자화 필드 | `config_v3.py` |
+| teacher/judge 레지스트리 (실측 repo·용량, `qwen35_122b`·`mprometheus`·`llama70b`) + 양자화 필드 | `config_v3.py` |
 | 평가 패널 3 고정 + `same_family_judges()` + `MIN_JUDGES_PER_CASE` + 입장기준 | `config_v3.py` |
-| pair-judge → `qwen72b`, teacher 키, checklist 추출기 분리 | `config_v3.py`, `build_gold_checklist_v3.py` |
+| pair-judge → `prometheus`, teacher 키, checklist 추출기 분리 | `config_v3.py`, `build_gold_checklist_v3.py` |
+| 역할 env 오버라이드 + `validate_roles()` 순환 검증 + 보유 확인 | `config_v3.py` |
 | gold 22 → GT few-shot 6 / test 16 층화 분할 | `data_splits.py` |
 | 회귀 테스트 3종 (동일 패널·gold 분할·프롬프트 영어화) | `tests_v3/test_v3.py` |
 
@@ -411,6 +462,6 @@ teacher/judge 키·양자화 포맷이 메타로 박힌다.
 - `python -m tests_v3.test_v3` (로컬에는 numpy/pandas가 없어 gold 분할 테스트를 못 돌렸다)
 - `python scripts/check_prompt_budget.py --models llama qwen35 gemma4` — 영어화로 지시문
   토큰이 줄었는지 실측 (예상: 감소, EMR 여유 증가)
-- 미러의 Qwen 72B AWQ / Llama-3.3-70B AWQ 실제 경로 → `MODELS[...]["dir"]` 확정
+- ~~미러의 Qwen 72B AWQ 경로 확정~~ → HF 실측으로 확정 완료. 남은 문제는 프록시 차단(§8c)
 - 프롬프트가 바뀌었으므로 `gold_checklist_v3.json`·`fewshot_bank_v3.json`·`calibration_v3.csv`
   전부 재생성 (`scripts/invalidate_v3.py`)
