@@ -213,11 +213,12 @@ def _resolve_tls(ca_bundle: str = None, insecure: bool = False):
 
 
 def _configure_http(verify):
-    """huggingface_hub 의 HTTP 백엔드에 verify 를 주입.
+    """huggingface_hub 의 HTTP 계층에 verify 를 주입.
 
-    공식 훅(configure_http_backend)이 있으면 그걸 쓰고, 없으면 httpx/requests 를 패치한다.
-    httpx 는 기본 컨텍스트를 certifi 로 만들기 때문에 SSL_CERT_FILE env 만으로는
-    안 먹는 경우가 있다 → verify 를 값으로 직접 넘기는 이 경로가 확실하다.
+    순서가 중요하다: **httpx/requests 를 먼저 패치**하고 그다음 hub 를 건드린다.
+    hub 를 먼저 import 하면 그 시점에 만들어진 클라이언트가 옛 verify 를 물고 있어
+    나중 패치가 안 먹는다. (구버전 hub 는 configure_http_backend 가 없거나,
+    httpx 로 이전한 최신 hub 는 그 함수를 제거했다 — 둘 다 이 경로로 커버된다.)
     """
     if verify is False:
         print("[WARN] TLS 검증 비활성 — HF 토큰이 미검증 연결로 전송된다 (신뢰망 전용)")
@@ -229,80 +230,69 @@ def _configure_http(verify):
     if verify is True:
         return                      # 기본값 그대로
 
-    # env 도 같이 세팅 (하위 프로세스·requests 경로 대비)
-    if isinstance(verify, str):
+    if isinstance(verify, str):     # 하위 프로세스·requests 경로 대비
         for env in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
             os.environ.setdefault(env, verify)
 
-    injected = False
-    try:
-        import huggingface_hub as _hf
-        from huggingface_hub import configure_http_backend
-
-        # 백엔드가 httpx 인지 requests 인지 **추측하지 말고 확인**한다.
-        #   hub >= 0.30 은 httpx, 그 이전은 requests. httpx 가 깔려 있다는 사실만으로
-        #   httpx.Client 를 requests 기반 hub 에 주입하면 그대로 깨진다.
-        backend = "requests"
-        try:
-            import huggingface_hub.utils._http as _hh
-            if getattr(_hh, "httpx", None) is not None:
-                backend = "httpx"
-        except Exception:
-            ver = getattr(_hf, "__version__", "0")
-            try:
-                major, minor = (int(x) for x in ver.split(".")[:2])
-                backend = "httpx" if (major, minor) >= (0, 30) else "requests"
-            except Exception:
-                pass
-
-        if backend == "httpx":
-            import httpx
-
-            def _httpx_factory(v=verify):
-                return httpx.Client(verify=v, follow_redirects=True, timeout=60.0)
-            configure_http_backend(backend_factory=_httpx_factory)
-        else:
-            import requests
-
-            def _req_factory(v=verify):
-                s = requests.Session()
-                s.verify = v
-                return s
-            configure_http_backend(backend_factory=_req_factory)
-        injected = True
-        print(f"  (TLS: huggingface_hub {getattr(_hf, '__version__', '?')} · "
-              f"{backend} 백엔드에 주입)")
-    except Exception as e:
-        print(f"  (configure_http_backend 사용 불가: {type(e).__name__}: "
-              f"{str(e)[:80]} — 직접 패치로 전환)")
-
-    if injected:
-        return
-
-    # 폴백: 라이브러리 클래스 자체를 패치 (구버전 huggingface_hub)
-    try:
+    patched = []
+    try:                            # ① httpx (최신 hub 가 쓰는 백엔드)
         import httpx
         for cls in (httpx.Client, httpx.AsyncClient):
             orig = cls.__init__
 
-            def patched(self, *a, _orig=orig, _v=verify, **kw):
+            def _init(self, *a, _orig=orig, _v=verify, **kw):
                 kw["verify"] = _v
                 _orig(self, *a, **kw)
-            cls.__init__ = patched
-        print("  (TLS: httpx 직접 패치)")
+            cls.__init__ = _init
+        patched.append("httpx")
     except ImportError:
         pass
-    try:
+    try:                            # ② requests (구버전 hub)
         import requests
         orig_req = requests.Session.request
 
-        def patched_req(self, *a, _orig=orig_req, _v=verify, **kw):
+        def _request(self, *a, _orig=orig_req, _v=verify, **kw):
             kw.setdefault("verify", _v)
             return _orig(self, *a, **kw)
-        requests.Session.request = patched_req
-        print("  (TLS: requests 직접 패치)")
+        requests.Session.request = _request
+        patched.append("requests")
     except ImportError:
         pass
+
+    # ③ 공식 훅이 있으면 추가로 등록 (없으면 ①②로 충분하다 — 경고 아님)
+    hook = ""
+    try:
+        import huggingface_hub as _hf
+        ver = getattr(_hf, "__version__", "?")
+        try:
+            from huggingface_hub import configure_http_backend
+            backend = "requests"
+            try:
+                import huggingface_hub.utils._http as _hh
+                if getattr(_hh, "httpx", None) is not None:
+                    backend = "httpx"
+            except Exception:
+                pass
+            if backend == "httpx":
+                import httpx as _hx
+
+                def _factory(v=verify):
+                    return _hx.Client(verify=v, follow_redirects=True, timeout=120.0)
+            else:
+                import requests as _rq
+
+                def _factory(v=verify):
+                    ss = _rq.Session()
+                    ss.verify = v
+                    return ss
+            configure_http_backend(backend_factory=_factory)
+            hook = f" + configure_http_backend({backend})"
+        except ImportError:
+            hook = " (configure_http_backend 없음 — 패치로 충분)"
+        print(f"  (TLS 주입: {'/'.join(patched) or '없음'}{hook} · hub {ver})")
+    except Exception as e:
+        print(f"  (TLS 주입: {'/'.join(patched) or '없음'} · hub 확인 실패 {type(e).__name__}: "
+              f"{str(e)[:60]})")
 
 
 def _tune_hub_env(disable_xet=None, timeout: int = 120, workers_note: str = ""):
@@ -326,7 +316,15 @@ def _tune_hub_env(disable_xet=None, timeout: int = 120, workers_note: str = ""):
         print(f"  (프록시 감지: {', '.join(proxy)})")
     if disable_xet and "HF_HUB_DISABLE_XET" not in os.environ:
         os.environ["HF_HUB_DISABLE_XET"] = "1"
-        print("  (HF_HUB_DISABLE_XET=1 — 대용량 샤드를 Xet 대신 LFS CDN 으로 받는다)")
+    xet_off = os.environ.get("HF_HUB_DISABLE_XET", "0") == "1"
+    try:
+        import hf_xet          # noqa: F401
+        has_xet = True
+    except Exception:
+        has_xet = False
+    print(f"  (Xet: {'비활성' if xet_off else '활성'}"
+          f" · hf_xet {'설치됨' if has_xet else '없음'}"
+          f"{' — 대용량은 LFS CDN(cdn-lfs-*.hf.co) 경로로 받는다' if xet_off else ''})")
     if "HF_HUB_DOWNLOAD_TIMEOUT" not in os.environ:
         os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = str(timeout)
         print(f"  (HF_HUB_DOWNLOAD_TIMEOUT={timeout})")
