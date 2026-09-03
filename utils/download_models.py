@@ -348,6 +348,10 @@ def extract_ca(out_path: str, host: str = HF_HOST) -> bool:
     out = Path(out_path).expanduser()
     cmd = ["openssl", "s_client", "-showcerts", "-servername", host,
            "-connect", f"{host}:443"]
+    _px = _proxy_url()
+    if _px:                     # 직결이 없는 컨테이너 → openssl 도 프록시를 타야 한다
+        _ph, _pp = _proxy_hostport(_px)
+        cmd += ["-proxy", f"{_ph}:{_pp}"]
     print(f"[CA 추출] {' '.join(cmd)}")
     try:
         r = subprocess.run(cmd, input=b"", capture_output=True, timeout=60)
@@ -519,6 +523,11 @@ def probe_cdn(verify, repo: str = None, timeout: int = 20) -> bool:
         return True
     except Exception as e:
         print(f"  ③ CDN 실패({_t.time() - t0:.1f}s): {type(e).__name__}: {str(e)[:160]}")
+        if "xet" in cdn_host or "xet-bridge" in target:
+            print("\n  → 이 목적지는 **Xet** 경로다. Xet 을 끄면 다른 CDN 호스트"
+                  "(cdn-lfs-us-1.hf.co 등)로 리다이렉트되므로 그쪽이 열려 있으면 통과한다:")
+            print("       HF_HUB_DISABLE_XET=1 python utils/download_models.py --models <키>")
+            print("     (pip uninstall hf_xet 로 아예 제거해도 같은 효과)")
         print(f"\n  ⚠ huggingface.co 는 열려 있는데 {cdn_host} 가 막혀 있다.")
         print("     프록시 allowlist 에 아래 도메인 추가를 요청해야 한다:")
         print("       *.hf.co  (us.aws.cdn.hf.co · cas-bridge.xethub.hf.co ·")
@@ -527,38 +536,75 @@ def probe_cdn(verify, repo: str = None, timeout: int = 20) -> bool:
         return False
 
 
-def probe(verify, host: str = HF_HOST) -> bool:
-    """현재 TLS 설정으로 실제 핸드셰이크를 해본다 (huggingface_hub 없이도 동작)."""
+def _proxy_url() -> str:
+    """HTTPS 용 프록시 URL (없으면 빈 문자열). 폐쇄망 컨테이너는 직결이 없다."""
+    for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        v = os.environ.get(k)
+        if v:
+            return v
+    return ""
+
+
+def _proxy_hostport(url: str):
+    from urllib.parse import urlparse
+    u = urlparse(url if "//" in url else "http://" + url)
+    return u.hostname, (u.port or 3128)
+
+
+def probe(verify, host: str = HF_HOST, timeout: int = 20) -> bool:
+    """TLS 핸드셰이크 시험 — **프록시가 있으면 CONNECT 터널을 통해** 수행한다.
+
+    직접 socket 으로 붙으면 이 컨테이너에선 [Errno 101] Network is unreachable 이 난다
+    (직결 인터넷 없음, squid 만 허용). 터널 안에서 핸드셰이크해야 실제 경로와 같은
+    조건이 되고, 프록시가 TLS 를 가로채면 그 인증서 체인이 그대로 보인다.
+    """
     import socket
     import ssl
-    print(f"[probe] {host}:443 · {verify if verify is not True else 'certifi 기본'}")
-    if verify is False:
-        ctx = ssl._create_unverified_context()
-    elif isinstance(verify, str):
-        ctx = ssl.create_default_context(cafile=verify)
-    else:
-        try:
-            import certifi
-            ctx = ssl.create_default_context(cafile=certifi.where())
-        except ImportError:
-            ctx = ssl.create_default_context()
+
+    proxy = _proxy_url()
+    ctx = _ssl_ctx(verify)
+    route = f"프록시 {proxy} 경유" if proxy else "직결"
+    print(f"[probe] {host}:443 · {verify if verify is not True else 'certifi 기본'} · {route}")
     try:
-        with socket.create_connection((host, 443), timeout=20) as sock:
-            with ctx.wrap_socket(sock, server_hostname=host) as ss:
-                cert = ss.getpeercert() or {}
-                iss = dict(x[0] for x in cert.get("issuer", ()) if x)
-                sub = dict(x[0] for x in cert.get("subject", ()) if x)
-                print(f"  ✓ 핸드셰이크 성공 · TLS {ss.version()}")
-                print(f"    subject={sub.get('commonName')} / issuer={iss.get('commonName')}"
-                      f" ({iss.get('organizationName')})")
-                return True
+        if proxy:
+            phost, pport = _proxy_hostport(proxy)
+            sock = socket.create_connection((phost, pport), timeout=timeout)
+            req = (f"CONNECT {host}:443 HTTP/1.1\r\n"
+                   f"Host: {host}:443\r\n"
+                   f"User-Agent: handover-download-probe\r\n\r\n")
+            sock.sendall(req.encode())
+            resp = b""
+            while b"\r\n\r\n" not in resp:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+            status = resp.split(b"\r\n", 1)[0].decode("utf-8", "ignore")
+            if " 200" not in status:
+                print(f"  ✗ 프록시 CONNECT 거부: {status}")
+                print(f"    → {host} 가 프록시 allowlist 에 없다 (관리자 요청 필요)")
+                sock.close()
+                return False
+            print(f"  · CONNECT OK ({status})")
+        else:
+            sock = socket.create_connection((host, 443), timeout=timeout)
+
+        with ctx.wrap_socket(sock, server_hostname=host) as ss:
+            cert = ss.getpeercert() or {}
+            iss = dict(x[0] for x in cert.get("issuer", ()) if x)
+            sub = dict(x[0] for x in cert.get("subject", ()) if x)
+            print(f"  ✓ 핸드셰이크 성공 · TLS {ss.version()}")
+            print(f"    subject={sub.get('commonName')} / issuer={iss.get('commonName')}"
+                  f" ({iss.get('organizationName')})")
+            return True
     except ssl.SSLCertVerificationError as e:
-        print(f"  ✗ 인증서 검증 실패: {e.verify_message or e}")
-        print("    → --extract-ca 로 프록시 CA 를 뽑아 --ca-bundle 로 지정할 것")
+        print(f"  ✗ 인증서 검증 실패: {getattr(e, 'verify_message', None) or e}")
+        print("    → --fix-certifi (권장) 또는 --ca-bundle 로 병원 CA 를 지정할 것")
         return False
     except Exception as e:
         print(f"  ✗ 연결 실패: {type(e).__name__}: {str(e)[:200]}")
-        print("    → 프록시 env(HTTPS_PROXY/HTTP_PROXY/NO_PROXY) 확인")
+        if not proxy:
+            print("    → 이 환경은 직결 인터넷이 없다. HTTPS_PROXY/https_proxy 를 확인할 것")
         return False
 
 
