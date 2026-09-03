@@ -211,7 +211,26 @@ TRAIN_KEYS = ["llama", "qwen", "qwen35", "gemma4", "gemma4_31b", "hari"]
 #          방식(제외) 대신 **민감도 분석**으로 다룬다 — 같은 family judge를 뺀 LOO 재계산을
 #          항상 병기하고, 순위가 뒤집히면 "judge 편향 민감"으로 명시한다.
 #          (docs/PIPELINE_V3.2.md §6)
-EVAL_JUDGES = ["medgemma27b", "llama70b", "mprometheus"]
+def _env_keys(name: str, default) -> list:
+    """쉼표 구분 env 로 모델 키 목록을 오버라이드. 미등록 키는 즉시 실패."""
+    raw = os.environ.get(name)
+    keys = [k.strip() for k in raw.split(",") if k.strip()] if raw else list(default)
+    bad = [k for k in keys if k not in MODELS]
+    if bad:
+        raise ValueError(f"{name}: 레지스트리에 없는 모델 키 {bad} (MODELS 확인)")
+    return keys
+
+
+def _env_key(name: str, default: str) -> str:
+    key = os.environ.get(name, default)
+    if key not in MODELS:
+        raise ValueError(f"{name}: 레지스트리에 없는 모델 키 '{key}' (MODELS 확인)")
+    return key
+
+
+# 목표 구성. 폐쇄망에 모델이 아직 없으면 env 로 로컬 보유분으로 바꿔 돌린다:
+#   HANDOVER_EVAL_JUDGES=medgemma27b,qwen35,hari HANDOVER_TEACHER=gemma4_31b ...
+EVAL_JUDGES = _env_keys("HANDOVER_EVAL_JUDGES", ["medgemma27b", "llama70b", "mprometheus"])
 # 패널 선발 후보 — 손상검출 벤치 + (가능하면) 전문의 채점으로 상위 3개를 고른다.
 EVAL_JUDGE_CANDIDATES = ["medgemma27b", "llama70b", "mprometheus", "gemma4_31b", "qwen35"]
 # 케이스별 최소 유효 judge 수. 이보다 적으면 그 케이스는 제외 (전원 성공 요구 아님).
@@ -227,17 +246,98 @@ JUDGE_NEFF_WARN_RATIO = 0.5
 #   prometheus가 평가 패널로 올라갔으므로 쌍 생성 judge를 비워줘야 한다 (순환 금지).
 #   teacher와 같은 가중치를 쓰지만, DPO 쌍의 후보는 **학생 정책의 출력**이라 자기채점이 아니다.
 #   (SFT 타깃 선별 단계만 자기채점 성격이 남고, 이는 규칙 게이트 + 사람 검토로 보완한다)
-PAIRGEN_JUDGE = "prometheus"
+PAIRGEN_JUDGE = _env_key("HANDOVER_PAIRGEN_JUDGE", "prometheus")
 
 # 합성데이터 teacher (SFT 타깃 생성 전용 — DPO 쌍은 on-policy 유지)
 #   선발전(teacher bake-off) 결과로 확정한다. 후보: qwen35_122b / qwen35_27b / qwen72b
-TEACHER_KEY = "qwen35_122b"
+TEACHER_KEY = _env_key("HANDOVER_TEACHER", "qwen35_122b")
 TEACHER_CANDIDATES = ["qwen35_122b", "qwen35_27b", "qwen72b"]
 
 # gold checklist 구조화 추출기. 채점 judge가 아니라 '교수님 GT → 항목' 변환기다.
 #   v3.1은 EVAL_JUDGES[0] 을 썼는데, v3.2 패널 1번은 prometheus(엄격 JSON 취약)라
 #   기본값으로 부적합해졌다 → 가장 강한 instruct 모델을 명시적으로 지정한다.
-CHECKLIST_EXTRACTOR = "qwen35_122b"
+CHECKLIST_EXTRACTOR = _env_key("HANDOVER_CHECKLIST_EXTRACTOR", "qwen35_122b")
+
+
+def model_downloaded(key: str) -> bool:
+    """가중치가 실제로 있는지 (config 만 있고 weight 없는 '중단된 다운로드'는 False)."""
+    d = model_path(key)
+    if not (d / "config.json").exists():
+        return False
+    w = list(d.rglob("*.safetensors")) + list(d.rglob("*.bin"))
+    if not w:
+        return False
+    want = model_size_gb(key)
+    if want:
+        gb = sum(f.stat().st_size for f in w) / 1e9
+        if gb < want * 0.9:
+            return False
+    return True
+
+
+def missing_models(keys) -> list:
+    return [k for k in keys if not model_downloaded(k)]
+
+
+def assert_models_available(keys, stage: str = ""):
+    """스테이지 시작 전에 필요한 모델이 다 있는지 확인 — 몇 시간 뒤 죽는 걸 막는다."""
+    miss = missing_models(keys)
+    if miss:
+        raise FileNotFoundError(
+            f"[{stage or '모델 확인'}] 미보유 모델 {miss} "
+            f"(총 {sum(model_size_gb(k) for k in miss):.1f} GB)\n"
+            f"  → python utils/download_models.py --models {' '.join(miss)}\n"
+            f"  → 또는 env 로 보유분으로 교체: HANDOVER_TEACHER / HANDOVER_EVAL_JUDGES "
+            f"/ HANDOVER_PAIRGEN_JUDGE / HANDOVER_CHECKLIST_EXTRACTOR"
+        )
+
+
+def validate_roles(train_keys=None) -> list:
+    """순환 금지 규칙을 코드로 강제한다 (docs/PIPELINE_V3.2.md §2.3·§6.2).
+
+    하드 실패 — 이건 결과 해석을 불가능하게 만든다:
+      teacher ∈ EVAL_JUDGES        학습 타깃을 만든 모델이 그 결과를 채점
+      teacher == PAIRGEN_JUDGE     후보를 만든 모델이 스스로 고름
+      PAIRGEN_JUDGE ∈ EVAL_JUDGES  학습 신호 judge = 평가 judge (다린 파이프라인의 결함)
+    경고 — 허용하되 LOO 민감도로 보고해야 한다:
+      평가 judge 가 학습 대상 자체거나 같은 family
+      checklist 추출기가 평가 judge 와 동일
+    반환: 경고 문자열 목록.
+    """
+    train = list(train_keys if train_keys is not None else TRAIN_KEYS)
+    if TEACHER_KEY in EVAL_JUDGES:
+        raise ValueError(
+            f"[순환] teacher '{TEACHER_KEY}' 가 평가 패널에 있다 {EVAL_JUDGES} — "
+            "SFT 타깃을 만든 모델이 그 결과를 채점하게 된다. 둘 중 하나를 바꿀 것.")
+    if TEACHER_KEY == PAIRGEN_JUDGE:
+        raise ValueError(f"[순환] teacher == 쌍 judge ('{TEACHER_KEY}') — 자기채점.")
+    if PAIRGEN_JUDGE in EVAL_JUDGES:
+        raise ValueError(
+            f"[순환] 쌍 judge '{PAIRGEN_JUDGE}' 가 평가 패널에 있다 — "
+            "DPO 가 평가지표를 직접 최적화해 점수 상승의 해석이 불가능해진다.")
+
+    warns = []
+    for j in EVAL_JUDGES:
+        if j in train:
+            warns.append(f"평가 judge '{j}' 가 학습 대상이기도 하다 — 자기선호 위험(LOO 필수)")
+        else:
+            same = [t for t in train if model_family(t) == model_family(j)]
+            if same:
+                warns.append(f"평가 judge '{j}' 가 학습 대상 {same} 와 같은 family "
+                             f"'{model_family(j)}' — LOO 로 보고")
+    fams = {model_family(j) for j in EVAL_JUDGES}
+    if len(fams) < len(EVAL_JUDGES):
+        warns.append(f"평가 패널 family 중복 {sorted(fams)} — 판정자 오류상관(n_eff)이 커진다")
+    if CHECKLIST_EXTRACTOR in EVAL_JUDGES:
+        warns.append(f"checklist 추출기 '{CHECKLIST_EXTRACTOR}' 가 평가 judge 와 같다 — "
+                     "항목을 만든 모델이 그 항목의 충족을 판정한다")
+    return warns
+
+
+def role_summary() -> str:
+    """현재 역할 배치 한 줄 요약 (로그·provenance 용)."""
+    return (f"teacher={TEACHER_KEY} · pair_judge={PAIRGEN_JUDGE} · "
+            f"eval={'+'.join(EVAL_JUDGES)} · extractor={CHECKLIST_EXTRACTOR}")
 
 
 def judges_for(target_model_key: str) -> list:
