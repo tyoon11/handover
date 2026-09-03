@@ -28,17 +28,31 @@ export LD_PRELOAD=$CONDA_PREFIX/lib/libstdc++.so.6
 certificate in certificate chain` 로 실패한다. 프록시 CA 를 뽑아 지정하면 검증을 유지한 채
 해결된다.
 
+원인은 접속 차단이 아니다 — 이 컨테이너는 `REQUESTS_CA_BUNDLE`이 시스템 번들
+(`/etc/ssl/certs/ca-certificates.crt`, 병원 CA 포함)을 가리키고 있어서 curl과 예전
+requests 기반 huggingface_hub는 통과했다. 그런데 **httpx는 `REQUESTS_CA_BUNDLE`도
+`SSL_CERT_FILE`도 읽지 않고 certifi를 쓴다.** hub가 httpx로 바뀌면서 파이썬만 실패한다.
+
 ```bash
-python utils/download_models.py --extract-ca ~/hf_proxy_ca.pem      # 프록시 CA 추출
-python utils/download_models.py --probe --ca-bundle ~/hf_proxy_ca.pem   # 핸드셰이크 시험
-export HANDOVER_CA_BUNDLE=~/hf_proxy_ca.pem                          # 셸에 고정
-export HF_TOKEN=<토큰>                                                # gated 모델용
+python utils/download_models.py --fix-certifi     # certifi에 시스템 CA 덧붙임(백업·재실행 안전)
+python utils/download_models.py --probe           # 통과 확인
+export HF_TOKEN=<토큰>                             # gated 모델용
 
 python utils/download_models.py --group v32 --check    # 계획·디스크 확인
 python utils/download_models.py --group v32            # 받기 (v3.2 teacher·judge 후보)
 ```
 
-CA 방식이 안 되면 `--insecure`(= `HANDOVER_INSECURE_SSL=1`)로 검증을 끌 수 있다 —
+`--fix-certifi` 는 이 환경의 **모든 파이썬 HTTPS**(pip·datasets·vllm 다운로드 포함)를 함께
+고친다. 권한이 없어 certifi를 못 고치면 매번 지정하는 방식으로 우회한다:
+
+```bash
+export HANDOVER_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+python utils/download_models.py --probe --ca-bundle /etc/ssl/certs/ca-certificates.crt
+```
+
+시스템 번들에도 CA가 없으면 `--extract-ca ~/hf_proxy_ca.pem` 으로 프록시가 제시하는 체인을
+직접 뽑아 `--ca-bundle` 로 지정한다. 그래도 안 되면 `--insecure`(= `HANDOVER_INSECURE_SSL=1`)로
+검증을 끌 수 있다 —
 토큰이 미검증 연결로 나가므로 신뢰된 병원망 안에서만. 대상 목록은
 `pipeline_v3/config_v3.py` 의 `MODELS` 가 단일 소스다.
 

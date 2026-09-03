@@ -27,13 +27,23 @@ gated 모델(llama, gemma4, gemma4_31b, medgemma27b)은 HF 웹에서 라이선�
 병원망은 TLS 를 가로채기 때문에 huggingface.co 인증서 체인 끝에 병원 자체 CA 가 붙는다.
 파이썬 기본 신뢰목록(certifi)에는 그 CA 가 없어 검증이 실패한다. 해결 순서:
 
-  1) 프록시 CA 를 뽑아서 지정한다 (권장 — 검증을 유지한다)
+  0) 대개 시스템 번들에 이미 병원 CA 가 들어있다. 그걸 지정하면 끝난다.
+       python utils/download_models.py --probe --ca-bundle /etc/ssl/certs/ca-certificates.crt
+       export HANDOVER_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+     ※ 이 컨테이너는 REQUESTS_CA_BUNDLE 이 이미 시스템 번들을 가리키고 있다. 그런데
+        **httpx 는 REQUESTS_CA_BUNDLE·SSL_CERT_FILE 을 읽지 않는다** (certifi 로 컨텍스트를
+        직접 만든다). huggingface_hub 가 requests → httpx 로 바뀌면서 "전엔 됐는데 지금
+        안 되는" 상황이 생긴 원인이다. 그래서 env 가 아니라 verify 값으로 넘겨야 한다.
+
+  1) 파이썬 전체를 한 번에 고친다 (pip·datasets·vllm 다운로드까지 — 권장)
+       python utils/download_models.py --fix-certifi
+     certifi 번들에 시스템 번들의 누락 CA 만 덧붙인다(백업 생성, 재실행 안전).
+
+  2) 프록시 CA 를 직접 뽑아 지정한다 (시스템 번들에도 없을 때)
        python utils/download_models.py --extract-ca ~/hf_proxy_ca.pem
        python utils/download_models.py --probe --ca-bundle ~/hf_proxy_ca.pem
-       python utils/download_models.py --group v32 --ca-bundle ~/hf_proxy_ca.pem
-     (셸에 export 해두려면: export HANDOVER_CA_BUNDLE=~/hf_proxy_ca.pem)
 
-  2) 그래도 안 되면 검증을 끈다 (신뢰된 병원망 안에서만, 토큰이 미검증 TLS 로 나간다)
+  3) 최후수단 — 검증을 끈다 (신뢰된 병원망 안에서만, 토큰이 미검증 TLS 로 나간다)
        python utils/download_models.py --group v32 --insecure
 
 TLS 설정은 huggingface_hub 의 공식 훅 configure_http_backend() 로 주입하고,
@@ -336,6 +346,62 @@ def extract_ca(out_path: str, host: str = HF_HOST) -> bool:
     return True
 
 
+SYSTEM_CA = "/etc/ssl/certs/ca-certificates.crt"
+
+
+def _pem_blocks(text: str) -> list:
+    import re
+    return re.findall(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+                      text, re.DOTALL)
+
+
+def fix_certifi(src: str = SYSTEM_CA) -> bool:
+    """certifi 번들에 시스템 번들의 '없는 CA만' 덧붙인다 (백업 생성, idempotent).
+
+    왜 필요한가: httpx 는 REQUESTS_CA_BUNDLE / SSL_CERT_FILE 을 무시하고 certifi 를 쓴다.
+    certifi 를 고쳐두면 이 환경의 **모든 파이썬 HTTPS**(huggingface_hub·pip·datasets·vllm)가
+    병원 프록시를 통과한다. 매 명령에 --ca-bundle 을 붙이지 않아도 된다.
+    """
+    srcp = Path(src)
+    if not srcp.exists():
+        print(f"  ✗ 시스템 번들 없음: {src}")
+        return False
+    try:
+        import certifi
+    except ImportError:
+        print("  ✗ certifi 가 없다 (pip install certifi)")
+        return False
+
+    dst = Path(certifi.where())
+    have = set(_pem_blocks(dst.read_text(encoding="utf-8", errors="ignore")))
+    incoming = _pem_blocks(srcp.read_text(encoding="utf-8", errors="ignore"))
+    missing = [b for b in incoming if b not in have]
+
+    print(f"[fix-certifi] certifi {dst}")
+    print(f"  기존 {len(have)}개 · 시스템 번들 {len(incoming)}개 · 추가 대상 {len(missing)}개")
+    if not missing:
+        print("  이미 필요한 CA 가 다 들어있다 (변경 없음)")
+        return True
+
+    bak = dst.with_suffix(dst.suffix + ".bak")
+    if not bak.exists():
+        try:
+            bak.write_bytes(dst.read_bytes())
+            print(f"  백업 생성 {bak}")
+        except Exception as e:
+            print(f"  ✗ 백업 실패({e}) — 쓰기 권한 문제면 --ca-bundle 방식을 쓸 것")
+            return False
+    try:
+        with open(dst, "a", encoding="utf-8") as f:
+            f.write("\n# --- appended from " + src + " ---\n")
+            f.write("\n".join(missing) + "\n")
+    except Exception as e:
+        print(f"  ✗ 쓰기 실패({e}) — 권한 없으면 export HANDOVER_CA_BUNDLE={src} 로 우회")
+        return False
+    print(f"  ✓ CA {len(missing)}개 추가. 복구는  cp {bak} {dst}")
+    return probe(True)
+
+
 def probe(verify, host: str = HF_HOST) -> bool:
     """현재 TLS 설정으로 실제 핸드셰이크를 해본다 (huggingface_hub 없이도 동작)."""
     import socket
@@ -391,8 +457,14 @@ def main():
                     help="프록시 CA 체인을 PEM 으로 뽑아 저장하고 종료")
     ap.add_argument("--probe", action="store_true",
                     help="TLS 핸드셰이크만 시험하고 종료")
+    ap.add_argument("--fix-certifi", dest="fix_certifi", nargs="?", const=SYSTEM_CA,
+                    default=None, metavar="SYSTEM_BUNDLE",
+                    help=f"certifi 번들에 시스템 CA 를 덧붙여 파이썬 전체를 고친다 "
+                         f"(기본 {SYSTEM_CA})")
     args = ap.parse_args()
 
+    if args.fix_certifi:
+        sys.exit(0 if fix_certifi(args.fix_certifi) else 1)
     if args.extract_ca:
         sys.exit(0 if extract_ca(args.extract_ca) else 1)
 
