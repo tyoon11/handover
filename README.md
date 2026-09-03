@@ -87,6 +87,23 @@ python utils/download_models.py --models qwen35_122b --max-workers 2
 `hf_transfer`(`HF_HUB_ENABLE_HF_TRANSFER=1`)는 쓰지 말 것 — Rust 다운로더가 자체 TLS
 루트를 써서 시스템 CA(병원 CA)를 보지 않는다.
 
+**프록시 허용 정책 확인** — `403`(즉시)과 `무응답`(타임아웃)은 원인이 다르고 요청 대상도 다르다:
+
+```bash
+python utils/download_models.py --probe-proxy
+```
+
+| CONNECT 응답 | 원인 | 요청할 곳 |
+|---|---|---|
+| `200 Connection established` | 허용 + 연결 성공 | — |
+| `403` (+ `X-Squid-Error`) | squid ACL 거부 (허용목록에 없음) | 프록시 담당 — `*.hf.co` 추가 |
+| `407` | 프록시 인증 필요 | 프록시 담당 — 자격증명 |
+| `503`/`504` | squid 는 허용, 상단 연결·DNS 실패 | 네트워크 보안 담당 |
+| 무응답(타임아웃) | squid 통과 후 방화벽 drop 추정 | 네트워크 보안 담당 |
+
+`example.com` 결과가 기본정책을 알려준다 — 통과하면 allowlist 방식이 **아니므로**
+"허용목록 추가"가 아니라 "해당 호스트/대역 차단 해제"로 요청해야 한다.
+
 필요 데이터(서버 `DATA_DIR`에 있어야 함): v1과 동일한 pkl들
 (`gold_sampled_251008.pkl`, `jsft_251008.pkl`, `selfjudge_251008.pkl`, `rlhf_251008.pkl`,
 `vital_summary_map.pkl`) + `gold_sampled/인계요약지_gold_sampled_251002_KHS.xlsx`

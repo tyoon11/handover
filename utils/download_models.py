@@ -452,6 +452,105 @@ def _ssl_ctx(verify):
         return ssl.create_default_context()
 
 
+PROXY_PROBE_HOSTS = [
+    ("huggingface.co", "HF API·소용량 (허용 확인됨)"),
+    ("us.aws.cdn.hf.co", "대용량 리다이렉트 목적지 (문제 호스트)"),
+    ("cdn-lfs-us-1.hf.co", "클래식 LFS CDN"),
+    ("cas-bridge.xethub.hf.co", "Xet CAS"),
+    ("example.com", "무관한 외부 — 기본정책 판별(allowlist vs blocklist)"),
+    ("pypi.org", "pip 미러가 아닌 원본"),
+]
+
+
+def probe_proxy(hosts=None, timeout: int = 25) -> bool:
+    """프록시가 호스트별로 어떻게 응답하는지 CONNECT 만 보내 확인한다.
+
+    왜: '막혔다'의 원인이 두 갈래인데 대응이 다르다.
+      - squid ACL 거부       → 즉시 **403**(+ X-Squid-Error) / 인증필요면 407
+      - squid 는 허용, 상단 방화벽이 drop → **무응답(타임아웃)** 또는 503/504
+    TLS 이전 단계라 인증서·CA 와 무관하게 경로만 본다.
+
+    example.com 결과가 특히 중요하다 — 이것이 통과하면 프록시는 allowlist 방식이 아니고,
+    그러면 '허용 목록에 추가' 요청이 아니라 '해당 대역 차단 해제' 요청이어야 한다.
+    """
+    import socket
+    import time as _t
+
+    proxy = _proxy_url()
+    if not proxy:
+        print("프록시 env 가 없다 (HTTPS_PROXY/https_proxy) — 이 진단은 프록시 환경 전용")
+        return False
+    phost, pport = _proxy_hostport(proxy)
+    print(f"[probe-proxy] {phost}:{pport} · CONNECT 만 보내 응답을 본다 "
+          f"(타임아웃 {timeout}s)\n")
+    print(f"  {'호스트':<26} {'경과':>6}  {'응답':<34} 판정")
+    print("  " + "-" * 96)
+
+    verdicts = {}
+    for host, note in (hosts or PROXY_PROBE_HOSTS):
+        t0 = _t.time()
+        status, extra, verdict = "", "", ""
+        try:
+            sock = socket.create_connection((phost, pport), timeout=timeout)
+            sock.settimeout(timeout)
+            sock.sendall((f"CONNECT {host}:443 HTTP/1.1\r\n"
+                          f"Host: {host}:443\r\n"
+                          f"User-Agent: handover-proxy-probe\r\n\r\n").encode())
+            resp = b""
+            while b"\r\n\r\n" not in resp and len(resp) < 65536:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+            sock.close()
+            head = resp.decode("utf-8", "ignore")
+            status = head.split("\r\n", 1)[0].strip() or "(빈 응답)"
+            for line in head.split("\r\n"):
+                if line.lower().startswith(("x-squid-error", "x-cache", "server:")):
+                    extra += (" | " if extra else "") + line.strip()
+            code = ""
+            for tok in status.split():
+                if tok.isdigit():
+                    code = tok
+                    break
+            if code == "200":
+                verdict = "허용 + 연결성공"
+            elif code == "403":
+                verdict = "★ 프록시 ACL 거부 (허용목록에 없음)"
+            elif code == "407":
+                verdict = "프록시 인증 필요"
+            elif code in ("503", "504"):
+                verdict = "★ 프록시는 허용, 상단 연결/DNS 실패"
+            else:
+                verdict = f"기타(code={code or '?'})"
+        except socket.timeout:
+            status = "(무응답)"
+            verdict = "★ 타임아웃 — 상단 방화벽 drop 가능성"
+        except Exception as e:
+            status = f"{type(e).__name__}"
+            verdict = f"연결 실패: {str(e)[:40]}"
+        el = _t.time() - t0
+        verdicts[host] = verdict
+        print(f"  {host:<26} {el:5.1f}s  {status:<34} {verdict}")
+        if extra:
+            print(f"  {'':<26} {'':>6}  {extra[:90]}")
+        print(f"  {'':<26} {'':>6}  ({note})")
+
+    print("\n  읽는 법")
+    print("   · 403 이면 squid 허용목록 문제 → '*.hf.co 추가' 요청이 맞다")
+    print("   · 무응답/503 이면 squid 는 통과시켰고 그 위(방화벽·egress)에서 막힌 것")
+    print("     → 요청 대상이 프록시 담당자가 아니라 네트워크 보안 담당일 수 있다")
+    ex = verdicts.get("example.com", "")
+    if ex.startswith("허용"):
+        print("   · example.com 이 통과했다 → 프록시는 **allowlist 방식이 아니다**.")
+        print("     그러면 'us.aws.cdn.hf.co 만' 막힌 것이므로 IP 대역·카테고리 차단"
+              "(CDN/파일공유 분류)일 가능성이 크다.")
+    elif ex:
+        print("   · example.com 도 막혔다 → 기본거부(allowlist) 방식 확정."
+              " '*.hf.co 허용 추가' 요청이 정확하다.")
+    return True
+
+
 def probe_cdn(verify, repo: str = None, timeout: int = 20) -> bool:
     """대용량 파일이 실제로 어느 호스트로 리다이렉트되고, 그 호스트에 닿는지 시험한다.
 
@@ -638,6 +737,9 @@ def main():
                          "--probe-cdn 으로 도달성을 먼저 확인할 것)")
     ap.add_argument("--probe-cdn", dest="probe_cdn", nargs="?", const=None, default=False,
                     help="대용량 파일 리다이렉트 체인과 CDN 도달성을 시험 (repo 지정 가능)")
+    ap.add_argument("--probe-proxy", dest="probe_proxy", nargs="*", default=None,
+                    help="프록시 허용 정책 진단: 호스트별 CONNECT 응답(403=ACL거부 / "
+                         "무응답=상단 방화벽). 호스트 나열 가능")
     ap.add_argument("--fix-certifi", dest="fix_certifi", nargs="?", const=SYSTEM_CA,
                     default=None, metavar="SYSTEM_BUNDLE",
                     help=f"certifi 번들에 시스템 CA 를 덧붙여 파이썬 전체를 고친다 "
@@ -653,6 +755,9 @@ def main():
     print(f"[TLS] {how}")
     if args.probe:
         sys.exit(0 if probe(verify) else 1)
+    if args.probe_proxy is not None:
+        hosts = [(h, "직접 지정") for h in args.probe_proxy] if args.probe_proxy else None
+        sys.exit(0 if probe_proxy(hosts) else 1)
     if args.probe_cdn is not False:
         ok_tls = probe(verify)
         sys.exit(0 if (ok_tls and probe_cdn(verify, args.probe_cdn)) else 1)
