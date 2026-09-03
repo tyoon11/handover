@@ -305,7 +305,7 @@ def _configure_http(verify):
         pass
 
 
-def _tune_hub_env(disable_xet=None, timeout: int = 60, workers_note: str = ""):
+def _tune_hub_env(disable_xet=None, timeout: int = 120, workers_note: str = ""):
     """프록시 환경에서 **대용량 샤드만 0바이트로 멈추는** 문제 대응.
 
     관측된 증상: config.json 등 작은 파일은 받아지는데 *.safetensors 는 .incomplete 가
@@ -432,6 +432,101 @@ def fix_certifi(src: str = SYSTEM_CA) -> bool:
     return probe(True)
 
 
+class _Redirected(Exception):
+    def __init__(self, url):
+        self.url = url
+
+
+def _ssl_ctx(verify):
+    import ssl
+    if verify is False:
+        return ssl._create_unverified_context()
+    if isinstance(verify, str):
+        return ssl.create_default_context(cafile=verify)
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
+def probe_cdn(verify, repo: str = None, timeout: int = 20) -> bool:
+    """대용량 파일이 실제로 어느 호스트로 리다이렉트되고, 그 호스트에 닿는지 시험한다.
+
+    왜 필요한가: huggingface.co(API·작은 파일)는 열려 있는데 **대용량만** 막히는 일이
+    흔하다. 대용량은 다른 도메인으로 리다이렉트되기 때문이다:
+        구(舊)  cdn-lfs*.huggingface.co        ← *.huggingface.co 허용 규칙에 걸림
+        현(現)  us.aws.cdn.hf.co / xethub.hf.co ← **hf.co 는 다른 도메인**이라 별도 허용 필요
+    프록시 allowlist 가 *.huggingface.co 만 갖고 있으면 예전엔 되던 다운로드가
+    조용히(타임아웃까지 0바이트로) 멈춘다. 이 함수가 그 경계를 짚어준다.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    repo = repo or MODELS[TEACHER_CANDIDATES[0]]["repo"]
+    ctx = _ssl_ctx(verify)
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            raise _Redirected(newurl)
+
+    opener_nr = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ctx), _NoRedirect)
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+
+    print(f"[probe-cdn] repo={repo}")
+    # ① API (작은 요청) — 여기가 막히면 망 자체 문제
+    try:
+        with opener.open(f"https://{HF_HOST}/api/models/{repo}", timeout=timeout) as r:
+            meta = _json.loads(r.read().decode())
+        files = [s["rfilename"] for s in meta.get("siblings", [])
+                 if s["rfilename"].endswith(".safetensors")]
+        print(f"  ① API 도달 OK · safetensors {len(files)}개")
+    except Exception as e:
+        print(f"  ① API 실패: {type(e).__name__}: {str(e)[:160]}")
+        return False
+    if not files:
+        print("  (safetensors 없음 — 다른 repo 로 시험할 것)")
+        return False
+
+    # ② 리다이렉트 목적지 확인 (따라가지 않는다)
+    url = f"https://{HF_HOST}/{repo}/resolve/main/{files[0]}"
+    target = None
+    try:
+        req = urllib.request.Request(url, headers={"Range": "bytes=0-1023"})
+        with opener_nr.open(req, timeout=timeout) as r:
+            print(f"  ② 리다이렉트 없음 (HTTP {r.status}) — huggingface.co 가 직접 서빙")
+            return True
+    except _Redirected as e:
+        target = e.url
+    except Exception as e:
+        print(f"  ② 실패: {type(e).__name__}: {str(e)[:160]}")
+        return False
+
+    from urllib.parse import urlparse
+    cdn_host = urlparse(target).netloc
+    print(f"  ② 대용량 리다이렉트 → {cdn_host}")
+
+    # ③ 그 호스트에서 1KB 만 받아본다 — 여기서 걸리면 allowlist 문제
+    import time as _t
+    t0 = _t.time()
+    try:
+        req = urllib.request.Request(target, headers={"Range": "bytes=0-1023"})
+        with opener.open(req, timeout=timeout) as r:
+            n = len(r.read())
+        print(f"  ③ CDN 도달 OK · {n} bytes / {_t.time() - t0:.1f}s")
+        return True
+    except Exception as e:
+        print(f"  ③ CDN 실패({_t.time() - t0:.1f}s): {type(e).__name__}: {str(e)[:160]}")
+        print(f"\n  ⚠ huggingface.co 는 열려 있는데 {cdn_host} 가 막혀 있다.")
+        print("     프록시 allowlist 에 아래 도메인 추가를 요청해야 한다:")
+        print("       *.hf.co  (us.aws.cdn.hf.co · cas-bridge.xethub.hf.co ·")
+        print("                 transfer.xethub.hf.co · cdn-lfs*.hf.co)")
+        print("     타임아웃을 키우거나 워커를 줄여도 해결되지 않는다.")
+        return False
+
+
 def probe(verify, host: str = HF_HOST) -> bool:
     """현재 TLS 설정으로 실제 핸드셰이크를 해본다 (huggingface_hub 없이도 동작)."""
     import socket
@@ -493,8 +588,12 @@ def main():
                     help="Xet 스토리지 비활성 (프록시 감지 시 기본 동작)")
     ap.add_argument("--xet", dest="xet", action="store_true",
                     help="Xet 강제 사용 (프록시 없는 환경에서 더 빠르다)")
-    ap.add_argument("--download-timeout", dest="dl_timeout", type=int, default=60,
-                    help="HF_HUB_DOWNLOAD_TIMEOUT 초 (기본 60 — HF 기본 10은 프록시에 짧다)")
+    ap.add_argument("--download-timeout", dest="dl_timeout", type=int, default=120,
+                    help="HF_HUB_DOWNLOAD_TIMEOUT 초 (기본 120. HF 기본 10은 프록시에 짧다. "
+                         "다만 호스트가 아예 막힌 경우엔 값을 키워도 대기만 길어진다 — "
+                         "--probe-cdn 으로 도달성을 먼저 확인할 것)")
+    ap.add_argument("--probe-cdn", dest="probe_cdn", nargs="?", const=None, default=False,
+                    help="대용량 파일 리다이렉트 체인과 CDN 도달성을 시험 (repo 지정 가능)")
     ap.add_argument("--fix-certifi", dest="fix_certifi", nargs="?", const=SYSTEM_CA,
                     default=None, metavar="SYSTEM_BUNDLE",
                     help=f"certifi 번들에 시스템 CA 를 덧붙여 파이썬 전체를 고친다 "
@@ -510,6 +609,9 @@ def main():
     print(f"[TLS] {how}")
     if args.probe:
         sys.exit(0 if probe(verify) else 1)
+    if args.probe_cdn is not False:
+        ok_tls = probe(verify)
+        sys.exit(0 if (ok_tls and probe_cdn(verify, args.probe_cdn)) else 1)
     # huggingface_hub import 전에 env 를 확정해야 한다 (상수가 import 시점에 읽힌다)
     _tune_hub_env(disable_xet=(False if args.xet else (True if args.no_xet else None)),
                   timeout=args.dl_timeout,

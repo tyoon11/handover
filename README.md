@@ -62,9 +62,23 @@ python utils/download_models.py --probe --ca-bundle /etc/ssl/certs/ca-certificat
 대용량은 Xet 스토리지(`cas-bridge`/`transfer.xethub.hf.co`)로 리다이렉트되고 자체 청크
 프로토콜을 써서 프록시를 잘 통과하지 못한다.
 
-프록시 env 가 감지되면 스크립트가 `HF_HUB_DISABLE_XET=1`(LFS CDN 경로로 우회)과
-`HF_HUB_DOWNLOAD_TIMEOUT=60`(HF 기본 10초는 프록시 경유 대용량에 짧아 조용한 재시도만
-반복된다)을 자동으로 건다. 그래도 멈추면 동시연결을 낮춘다:
+먼저 **CDN 도달성**을 확인한다 — 이게 막혀 있으면 타임아웃·워커 조정으로는 절대 안 된다:
+
+```bash
+python utils/download_models.py --probe-cdn
+#   ① API 도달 OK
+#   ② 대용량 리다이렉트 → us.aws.cdn.hf.co
+#   ③ CDN 실패(20.0s): TimeoutError   ← 여기서 걸리면 프록시 allowlist 문제
+```
+
+`huggingface.co` 는 열려 있는데 CDN 만 막히는 이유: HF 가 대용량 전송을 **다른 도메인**으로
+옮겼다. 예전에는 `cdn-lfs*.huggingface.co` 라서 `*.huggingface.co` 허용 규칙에 걸렸지만,
+지금은 `us.aws.cdn.hf.co` · `cas-bridge.xethub.hf.co` 등 **`hf.co` 도메인**이다.
+→ 프록시 allowlist 에 **`*.hf.co`** 추가를 요청해야 한다. (그래서 "예전엔 됐는데 지금 안 됨"이 된다)
+
+CDN 이 열려 있는데도 멈추면 프록시 env 감지 시 스크립트가 자동으로 거는
+`HF_HUB_DISABLE_XET=1`(Xet 대신 LFS CDN 경로)과 `HF_HUB_DOWNLOAD_TIMEOUT=120`이 먼저 붙고,
+그다음 동시연결을 낮춘다:
 
 ```bash
 python utils/download_models.py --models qwen35_122b --max-workers 2
