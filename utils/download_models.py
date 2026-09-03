@@ -127,7 +127,8 @@ def print_plan(targets: list) -> float:
     return need
 
 
-def download_one(key: str, token, force: bool, revision=None) -> bool:
+def download_one(key: str, token, force: bool, revision=None,
+                 max_workers: int = 8) -> bool:
     from huggingface_hub import snapshot_download
 
     info = MODELS[key]
@@ -146,7 +147,7 @@ def download_one(key: str, token, force: bool, revision=None) -> bool:
     try:
         path = snapshot_download(repo_id=info["repo"], local_dir=str(local), token=token,
                                  revision=revision, ignore_patterns=IGNORE_PATTERNS,
-                                 max_workers=8)
+                                 max_workers=max_workers)
         ok2, detail2, gb = check_status(key)
         mins = (time.time() - t0) / 60
         if ok2:
@@ -304,6 +305,35 @@ def _configure_http(verify):
         pass
 
 
+def _tune_hub_env(disable_xet=None, timeout: int = 60, workers_note: str = ""):
+    """프록시 환경에서 **대용량 샤드만 0바이트로 멈추는** 문제 대응.
+
+    관측된 증상: config.json 등 작은 파일은 받아지는데 *.safetensors 는 .incomplete 가
+    0바이트로 고정. 원인은 파일 종류에 따라 **호스트가 달라지는 것**이다.
+      - 작은 파일 : huggingface.co 에서 그대로 내려온다 → 프록시 통과
+      - 대용량    : Xet 스토리지(cas-bridge/transfer.xethub.hf.co)로 리다이렉트되고
+                    자체 청크 프로토콜을 쓴다 → 병원/기업 프록시에서 자주 막힌다
+    그래서 프록시가 감지되면 Xet 을 끄고 기존 LFS CDN 경로로 받게 한다.
+    HF_HUB_DOWNLOAD_TIMEOUT 기본 10초도 프록시 경유엔 너무 짧아 조용한 재시도만 반복된다.
+
+    ⚠ 이 env 들은 huggingface_hub **import 전에** 설정해야 반영된다.
+    """
+    proxy = [k for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
+             if os.environ.get(k)]
+    if disable_xet is None:
+        disable_xet = bool(proxy)
+    if proxy:
+        print(f"  (프록시 감지: {', '.join(proxy)})")
+    if disable_xet and "HF_HUB_DISABLE_XET" not in os.environ:
+        os.environ["HF_HUB_DISABLE_XET"] = "1"
+        print("  (HF_HUB_DISABLE_XET=1 — 대용량 샤드를 Xet 대신 LFS CDN 으로 받는다)")
+    if "HF_HUB_DOWNLOAD_TIMEOUT" not in os.environ:
+        os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = str(timeout)
+        print(f"  (HF_HUB_DOWNLOAD_TIMEOUT={timeout})")
+    if workers_note:
+        print(f"  ({workers_note})")
+
+
 HF_HOST = "huggingface.co"
 
 
@@ -457,6 +487,14 @@ def main():
                     help="프록시 CA 체인을 PEM 으로 뽑아 저장하고 종료")
     ap.add_argument("--probe", action="store_true",
                     help="TLS 핸드셰이크만 시험하고 종료")
+    ap.add_argument("--max-workers", dest="max_workers", type=int, default=8,
+                    help="동시 다운로드 수 (기본 8). 프록시가 동시연결을 조이면 2 로 낮출 것")
+    ap.add_argument("--no-xet", dest="no_xet", action="store_true",
+                    help="Xet 스토리지 비활성 (프록시 감지 시 기본 동작)")
+    ap.add_argument("--xet", dest="xet", action="store_true",
+                    help="Xet 강제 사용 (프록시 없는 환경에서 더 빠르다)")
+    ap.add_argument("--download-timeout", dest="dl_timeout", type=int, default=60,
+                    help="HF_HUB_DOWNLOAD_TIMEOUT 초 (기본 60 — HF 기본 10은 프록시에 짧다)")
     ap.add_argument("--fix-certifi", dest="fix_certifi", nargs="?", const=SYSTEM_CA,
                     default=None, metavar="SYSTEM_BUNDLE",
                     help=f"certifi 번들에 시스템 CA 를 덧붙여 파이썬 전체를 고친다 "
@@ -472,6 +510,10 @@ def main():
     print(f"[TLS] {how}")
     if args.probe:
         sys.exit(0 if probe(verify) else 1)
+    # huggingface_hub import 전에 env 를 확정해야 한다 (상수가 import 시점에 읽힌다)
+    _tune_hub_env(disable_xet=(False if args.xet else (True if args.no_xet else None)),
+                  timeout=args.dl_timeout,
+                  workers_note=f"동시 다운로드 {args.max_workers}개")
     _configure_http(verify)
 
     targets = args.models or group_keys(args.group or "v32")
@@ -492,7 +534,8 @@ def main():
             print("취소")
             return
 
-    results = {k: download_one(k, token, args.force, args.revision) for k in targets}
+    results = {k: download_one(k, token, args.force, args.revision,
+                               max_workers=args.max_workers) for k in targets}
 
     print("\n" + "=" * 60)
     ok = [k for k, v in results.items() if v]
