@@ -22,6 +22,26 @@ export HANDOVER_MODEL_DIR=/home/coder/workspace/data/local_models
 export LD_PRELOAD=$CONDA_PREFIX/lib/libstdc++.so.6
 ```
 
+### 모델 다운로드 (병원 프록시 TLS 포함)
+
+병원망은 TLS 를 가로채므로 HF 다운로드가 `CERTIFICATE_VERIFY_FAILED: self-signed
+certificate in certificate chain` 로 실패한다. 프록시 CA 를 뽑아 지정하면 검증을 유지한 채
+해결된다.
+
+```bash
+python utils/download_models.py --extract-ca ~/hf_proxy_ca.pem      # 프록시 CA 추출
+python utils/download_models.py --probe --ca-bundle ~/hf_proxy_ca.pem   # 핸드셰이크 시험
+export HANDOVER_CA_BUNDLE=~/hf_proxy_ca.pem                          # 셸에 고정
+export HF_TOKEN=<토큰>                                                # gated 모델용
+
+python utils/download_models.py --group v32 --check    # 계획·디스크 확인
+python utils/download_models.py --group v32            # 받기 (v3.2 teacher·judge 후보)
+```
+
+CA 방식이 안 되면 `--insecure`(= `HANDOVER_INSECURE_SSL=1`)로 검증을 끌 수 있다 —
+토큰이 미검증 연결로 나가므로 신뢰된 병원망 안에서만. 대상 목록은
+`pipeline_v3/config_v3.py` 의 `MODELS` 가 단일 소스다.
+
 필요 데이터(서버 `DATA_DIR`에 있어야 함): v1과 동일한 pkl들
 (`gold_sampled_251008.pkl`, `jsft_251008.pkl`, `selfjudge_251008.pkl`, `rlhf_251008.pkl`,
 `vital_summary_map.pkl`) + `gold_sampled/인계요약지_gold_sampled_251002_KHS.xlsx`

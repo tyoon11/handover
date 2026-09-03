@@ -136,28 +136,33 @@ _EXTRACT_SYSTEM = (
     "is_normal_case=true with items=[]. Output strict JSON only."
 )
 
-_EXTRACT_TMPL = """아래 '교수님 gold 인계문'을 정답으로 삼아, 모델 인계문이 반드시 cover해야 할
-핵심 항목(checklist)으로 구조화하세요.
+_EXTRACT_TMPL = """Convert the senior anesthesiologist's gold handoff below into a structured
+checklist of the key items that a model handoff MUST cover.
 
-규칙:
-- 항목 집합 = '교수님 gold가 담은 내용'만. gold에 없는 소견은 절대 추가 금지
-  (특히 QTc 연장, 일시적 SpO2 저하, 혈압/심박 이벤트 횟수 등 vital 파생 항목).
-- EMR은 약어 풀이와 source 인용에만 사용.
-- gold가 device만 언급하면 그 device를 low 항목 1개로, 나머지는 is_normal_case 판단.
-- gold가 사실상 '특이사항 없음'뿐이면 is_normal_case=true, items=[].
-- category는 반드시 아래 **필수 항목군** 6개 중 하나. 어디에도 안 맞으면 "other".
-- severity: high/medium/low. source: EMR 근거 원문(없으면 gold 인용).
+RULES:
+- The item set comes ONLY from what the gold handoff states. NEVER add a finding the gold did not
+  state — in particular no vital-derived items (QTc prolongation, transient desaturation,
+  blood-pressure / heart-rate event counts) unless the gold itself mentions them.
+- Use the EMR only to expand abbreviations and to quote a short source span.
+- If the gold mentions only a device, make that device a single "low" item and judge
+  is_normal_case for the rest.
+- If the gold is effectively "특이사항 없음" (no issue) and nothing else, return
+  is_normal_case=true with items=[].
+- "category" MUST be one of the six mandatory group ids below; use "other" if nothing fits.
+- "severity": high / medium / low.
+- "finding" and "source" stay in KOREAN (the gold's / EMR's own wording — this checklist is
+  reviewed by clinicians). All JSON keys, category ids and severity values are English.
 
-### 필수 항목군 (category 값)
+### MANDATORY GROUPS (allowed "category" values)
 {categories}
 
-JSON만 출력:
+Output ONLY this JSON:
 {{"is_normal_case": <bool>, "items": [{{"id":"c1","finding":"...","category":"...","severity":"...","source":"..."}}]}}
 
-### 교수님 gold 인계문 (정답)
+### GOLD HANDOFF (ground truth — the authoritative source of WHAT matters)
 {gold}
 
-### EMR (약어 풀이/근거 인용용 — 새 소견 추가 금지)
+### EMR (for abbreviation expansion and source quotes only — do NOT add new findings)
 {emr}
 
 ### JSON

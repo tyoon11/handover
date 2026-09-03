@@ -27,7 +27,7 @@ def _early_gpus():
 _early_gpus()
 
 from .config_v3 import (      # noqa: E402
-    EVAL_JUDGES, GOLD_CHECKLIST_JSON, GOLD_KHS_XLSX, GOLD_PKL, model_path,
+    CHECKLIST_EXTRACTOR, GOLD_CHECKLIST_JSON, GOLD_KHS_XLSX, GOLD_PKL, model_path,
 )
 from .eval_v3 import checklist as CK      # noqa: E402
 
@@ -39,8 +39,8 @@ def main():
     ap.add_argument("--accept", action="store_true",
                     help="전문의 검수 불가 시 잠정 채택 (accepted_without_review=true; "
                          "reviewed는 절대 자동 설정하지 않음)")
-    ap.add_argument("--extractor", type=str, default=EVAL_JUDGES[0],
-                    help="checklist 구조화에 쓸 로컬 모델 키")
+    ap.add_argument("--extractor", type=str, default=CHECKLIST_EXTRACTOR,
+                    help="checklist 구조화에 쓸 로컬 모델 키 (채점 judge 아님)")
     args = ap.parse_args()
 
     import pandas as pd

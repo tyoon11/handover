@@ -132,12 +132,62 @@ def test_coverage_verdict_id_validation():
 
 
 # ── 교차 judge 배정 (T7) ────────────────────────────────────────────────────
-def test_cross_judge_assignment():
+def test_uniform_judge_panel():
+    """v3.2: 채점자는 대상 모델과 무관하게 동일해야 한다 (§6)."""
+    from pipeline_v3.config_v3 import (
+        EVAL_JUDGES, PAIRGEN_JUDGE, TEACHER_KEY, same_family_judges,
+    )
+    for target in ("llama", "qwen", "qwen35", "gemma4", "gemma4_31b", "hari"):
+        assert judges_for(target) == EVAL_JUDGES, f"{target} 의 채점자가 패널과 다르다"
+    # family 중복은 '제외'가 아니라 LOO 민감도용 정보로만 남는다
+    assert same_family_judges("llama") == ["llama70b"]
+    assert same_family_judges("qwen") == []
+    # 순환 금지: 쌍 생성 judge 는 평가 패널에 없어야 한다
+    assert PAIRGEN_JUDGE not in EVAL_JUDGES
+    # teacher 도 평가 패널에 없어야 한다 (자기 출력을 배운 학생을 자기가 채점)
+    assert TEACHER_KEY not in EVAL_JUDGES
     assert model_family("gemma4_31b") == "gemma"
-    assert "gemma4_31b" not in judges_for("gemma4")          # 같은 family 제외
-    assert judges_for("gemma4") == ["qwen35"]
-    assert judges_for("qwen35") == ["gemma4_31b"]
-    assert set(judges_for("llama")) == {"gemma4_31b", "qwen35"}
+
+
+# ── v3.2 §3: gold 22 → GT few-shot 6 / test 16 ─────────────────────────────
+def test_gold_gt_fewshot_split_is_disjoint_and_deterministic():
+    import pandas as pd
+    from pipeline_v3.data_splits import split_gold
+    from pipeline_v3.prompt_utils import EMR_SID_COL
+
+    df = pd.DataFrame({EMR_SID_COL: list(range(100, 122))})   # 22건
+    fs1, te1 = split_gold(df)
+    fs2, te2 = split_gold(df)
+    assert len(fs1) == 6 and len(te1) == 16
+    s_fs = set(fs1[EMR_SID_COL]); s_te = set(te1[EMR_SID_COL])
+    assert not (s_fs & s_te), "GT few-shot 과 test 가 겹친다 — 평가셋 유출"
+    assert s_fs | s_te == set(range(100, 122)), "22건이 보존되지 않았다"
+    assert list(fs2[EMR_SID_COL]) == list(fs1[EMR_SID_COL]), "분할이 비결정적"
+    assert list(te2[EMR_SID_COL]) == list(te1[EMR_SID_COL]), "분할이 비결정적"
+
+
+# ── v3.2 §1/§4: 프롬프트 영어화 + 지문 동결 ────────────────────────────────
+def test_prompts_are_english_and_fingerprinted():
+    from pipeline_v3.prompt_registry import all_prompts, assert_same, fingerprint
+
+    prompts = all_prompts()
+    # 지시문의 한글은 '데이터 리터럴'만 허용 — 프롬프트당 40자 미만이어야 한다
+    for name, text in prompts.items():
+        n_ko = sum(1 for ch in text if '가' <= ch <= '힣')
+        assert n_ko < 40, f"{name} 에 한국어 지시문이 남아있다 ({n_ko}자)"
+    # 필수 리터럴은 반드시 살아있어야 한다
+    assert "특이사항 없음" in prompts["gen.system"]
+    assert "[유의]" in prompts["gen.system"]
+    fp = fingerprint()
+    assert fp["spec_version"] == "v3.2-en" and len(fp["sha1"]) == 16
+    assert_same(fp)                       # 자기 자신과는 통과
+    bad = dict(fp, sha1="deadbeefdeadbeef")
+    try:
+        assert_same(bad)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("지문 불일치를 잡지 못했다")
 
 
 # ── 통계 (E8/B4) ────────────────────────────────────────────────────────────

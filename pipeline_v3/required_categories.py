@@ -78,9 +78,54 @@ REQUIRED_CATEGORIES = [
     ),
 ]
 
+# 프롬프트 삽입용 영어 라벨·설명 (v3.2 — 모든 프롬프트는 영어).
+# 위 한국어 라벨/설명은 리포트·사람 검토용으로 그대로 남는다 (같은 내용의 두 언어판).
+CATEGORY_EN = {
+    "comorbidity_medication": (
+        "Comorbidity and medication",
+        "Major underlying conditions (congenital anomalies, syndromes, cardiopulmonary "
+        "disease), drugs given or currently taken and their post-op impact (residual "
+        "neuromuscular blockade, opioids, anticonvulsants, steroids), allergies.",
+    ),
+    "airway_management": (
+        "Airway management",
+        "ETT/LMA type and size, difficult airway and number of intubation attempts, "
+        "whether extubated and the state after extubation, laryngospasm / bronchospasm / "
+        "croup / reintubation, post-op oxygen requirement.",
+    ),
+    "intraop_event": (
+        "Intraoperative events and interventions",
+        "Events that actually occurred (hypotension, bradycardia, arrhythmia, "
+        "desaturation, hypothermia) and what was done about them (vasopressors, fluid "
+        "bolus, atropine, transfusion), indwelling lines/devices, positioning problems. "
+        "A vital event MUST carry its duration and its deviation from the threshold "
+        "(nadir/peak).",
+    ),
+    "transfusion_fluid": (
+        "Transfusion and fluids",
+        "Blood loss (as % of EBV where possible), blood products and volumes transfused, "
+        "total fluid given, urine output / oliguria, hemodynamic and volume status at the "
+        "end of surgery.",
+    ),
+    "preop_abnormal_test": (
+        "Abnormal pre-op tests",
+        "Abnormal pre-op findings — labs, coagulation, electrolytes, imaging, ECG, "
+        "echocardiography, PFT — that affect post-op care.",
+    ),
+    "uri_status": (
+        "Recent URI (cold) status",
+        "Presence and timing of recent upper respiratory infection symptoms (within 2 "
+        "weeks / 2-4 weeks). It drives post-op respiratory risk directly, so convey it "
+        "whenever the gold handoff mentions it.",
+    ),
+}
+
 CATEGORY_IDS = [c[0] for c in REQUIRED_CATEGORIES]
 CATEGORY_LABELS = {c[0]: c[1] for c in REQUIRED_CATEGORIES}
 CATEGORY_DESCRIPTIONS = {c[0]: c[2] for c in REQUIRED_CATEGORIES}
+CATEGORY_LABELS_EN = {k: v[0] for k, v in CATEGORY_EN.items()}
+CATEGORY_DESCRIPTIONS_EN = {k: v[1] for k, v in CATEGORY_EN.items()}
+assert set(CATEGORY_EN) == set(CATEGORY_IDS), "CATEGORY_EN 이 6개 항목군과 불일치"
 
 FALLBACK_CATEGORY = "other"
 ALL_CATEGORY_IDS = CATEGORY_IDS + [FALLBACK_CATEGORY]
@@ -109,10 +154,15 @@ def normalize_category(raw) -> str:
     return LEGACY_CATEGORY_MAP.get(key, FALLBACK_CATEGORY)
 
 
-def prompt_block(indent: str = "") -> str:
-    """프롬프트에 삽입할 항목군 설명 블록 (한국어)."""
+def prompt_block(indent: str = "", lang: str = "en") -> str:
+    """프롬프트에 삽입할 항목군 설명 블록.
+
+    lang="en" (기본 — v3.2: 모든 LLM 프롬프트는 영어)
+    lang="ko" (사람이 읽는 문서·리포트용)
+    """
     lines = []
-    for i, (cid, label, desc) in enumerate(REQUIRED_CATEGORIES, 1):
+    for i, (cid, label_ko, desc_ko) in enumerate(REQUIRED_CATEGORIES, 1):
+        label, desc = CATEGORY_EN[cid] if lang == "en" else (label_ko, desc_ko)
         lines.append(f"{indent}{i}. {label} ({cid}) — {desc}")
     return "\n".join(lines)
 

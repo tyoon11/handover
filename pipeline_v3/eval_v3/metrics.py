@@ -19,7 +19,7 @@ v2 대비 수정 사항:
 
 from ..config_v3 import V3_WEIGHTS, is_no_issue_v3
 from ..required_categories import (
-    CATEGORY_LABELS, FALLBACK_CATEGORY, normalize_category,
+    CATEGORY_LABELS, CATEGORY_LABELS_EN, FALLBACK_CATEGORY, normalize_category,
 )
 
 OUT_DELIM_OPEN = "<<<MODEL_HANDOFF>>>"
@@ -42,17 +42,18 @@ _COVERAGE_SYSTEM = (
     "Return a verdict for EVERY item id. Output strict JSON only."
 )
 
-_COVERAGE_TMPL = """아래 '필수 인계 항목(gold checklist)'을 모델 인계문이 각각 다루는지 판정하세요.
-판정값: "yes"(명확히 전달) / "partial"(모호·불완전) / "no"(없음).
-모든 항목 id에 대해 빠짐없이 verdict를 반환하세요.
+_COVERAGE_TMPL = """Decide whether the model handoff below covers each required item of the gold checklist.
+Verdict: "yes" (clearly conveyed) / "partial" (vague or incomplete) / "no" (absent).
+The handoff is written in Korean; paraphrase and synonyms count as conveyed.
+Return a verdict for EVERY item id — omit none.
 
-### 모델 인계문 (구분자 안 텍스트만 채점 대상)
+### MODEL HANDOFF (grade ONLY the text inside the delimiters)
 {output}
 
-### 필수 인계 항목
+### REQUIRED ITEMS
 {items}
 
-다음 JSON으로만 출력:
+Output ONLY this JSON:
 {{"verdicts": [{{"id":"c1","status":"yes|partial|no"}}, ...]}}
 """
 
@@ -62,7 +63,7 @@ def build_coverage_prompt(output: str, entry: dict):
     lines = []
     for it in entry.get("items", []):
         cat = normalize_category(it.get("category"))
-        tag = CATEGORY_LABELS.get(cat, "기타")
+        tag = CATEGORY_LABELS_EN.get(cat, "other")
         lines.append(f'- {it["id"]} [{tag}]: {it["finding"]}')
     user = _COVERAGE_TMPL.format(output=_wrap_output(output), items="\n".join(lines))
     return _COVERAGE_SYSTEM, user
@@ -147,27 +148,30 @@ _FAITH_SYSTEM = (
     "as confirmed), or 'unsupported' (no basis). Output strict JSON only."
 )
 
-_FAITH_TMPL = """다음 모델 인계문의 각 주장을 원본 EMR/바이탈과 대조해 분류하세요.
-- supported: EMR/바이탈로 뒷받침됨
-- contradicted: 모순(예: 의심(r/o)을 확진처럼 단정, 안 한 처치를 했다고 기술)
-- unsupported: 근거 없음(창작/환각)
+_FAITH_TMPL = """Classify every claim in the model handoff below against the source EMR and vital summary.
+- supported: entailed by the EMR / vitals
+- contradicted: conflicts with them (e.g. a suspected (r/o) diagnosis stated as confirmed, or an
+  intervention described that was never performed)
+- unsupported: no basis in the EMR / vitals (fabricated)
 
-### 원본 EMR
+The EMR and the handoff are in Korean; judge meaning, not wording. Quote each claim verbatim.
+
+### SOURCE EMR
 {emr}
 
-### 수술 중 바이탈 요약
+### INTRAOPERATIVE VITAL SUMMARY
 {vital}
 
-### 모델 인계문 (구분자 안 텍스트만 채점 대상)
+### MODEL HANDOFF (grade ONLY the text inside the delimiters)
 {output}
 
-다음 JSON으로만 출력:
+Output ONLY this JSON:
 {{"claims": [{{"claim":"...","verdict":"supported|contradicted|unsupported"}}, ...]}}
 """
 
 
 def build_faithfulness_prompt(emr_text: str, vital_summary: str, output: str):
-    user = _FAITH_TMPL.format(emr=emr_text, vital=vital_summary or "(없음)",
+    user = _FAITH_TMPL.format(emr=emr_text, vital=vital_summary or "(none)",
                               output=_wrap_output(output))
     return _FAITH_SYSTEM, user
 
@@ -202,21 +206,25 @@ _BREVITY_SYSTEM = (
     "Output strict JSON only."
 )
 
-_BREVITY_TMPL = """다음 모델 인계문의 '간결성'을 1~5로 채점하세요(높을수록 간결, 노이즈 없음).
-감점 대상(노이즈):
-- 진단/수술명 부연 설명, 추론성 권고('~하니 ~해라')
-- 불필요 내용(약 잔량 반납, 이송 문구, "환자 설명은 다음과 같습니다" 류)
-- 정상 지표의 지나치게 구체적인 설명
+_BREVITY_TMPL = """Score the conciseness of the Korean model handoff below from 1 to 5
+(higher = more concise, less noise).
 
-감점하지 않는 것:
-- **이상** 바이탈에 붙은 지속시간·최저/최고 수치(예: "20분간 저혈압(최저 55mmHg)")
-  — 필수 정보이므로 장황함으로 보지 않는다.
+PENALIZE (noise):
+- restating or explaining diagnosis / procedure names, inferential recommendations
+  ("since X, you should do Y")
+- unnecessary content (returning leftover drugs, transport phrases, "the explanation given to
+  the patient is as follows")
+- over-detailed description of NORMAL indices
 
-### 모델 인계문 (구분자 안 텍스트만 채점 대상)
+DO NOT PENALIZE:
+- duration and nadir/peak numbers attached to an ABNORMAL vital finding
+  (e.g. "20분간 저혈압(최저 55mmHg)") — that is required information, not verbosity.
+
+### MODEL HANDOFF (grade ONLY the text inside the delimiters)
 {output}
 
-다음 JSON으로만 출력:
-{{"score": <1~5 정수>, "noise": ["감점 사유 짧게", ...]}}
+Output ONLY this JSON:
+{{"score": <integer 1-5>, "noise": ["short reason", ...]}}
 """
 
 

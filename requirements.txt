@@ -7,6 +7,14 @@ peft>=0.11
 datasets>=2.19
 accelerate>=0.30
 vllm>=0.5           # 없으면 HF fallback으로 동작하나 최종 비교는 vLLM 권장
+# ⚠ v3.2 teacher/judge 는 최신 아키텍처·양자화를 쓴다. 설치된 vLLM 이 아래를 지원하는지
+#   먼저 확인할 것 (미지원이면 조용히 HF 폴백 → 극단적으로 느려진다):
+#     - Qwen3.5 계열(GDN hybrid attention): qwen35_122b / qwen35_27b / qwen35
+#     - GPTQ-Int4 / AWQ (Marlin 커널, A6000=Ampere 에서 동작): qwen35_122b, qwen72b, llama70b
+#   확인:  python -c "import vllm; print(vllm.__version__)"
+#          python -c "from vllm import LLM; LLM('<모델경로>', max_model_len=2048)"
+# 양자화 모델을 HF(transformers)로 로드해야 한다면 아래가 추가로 필요하다:
+#   optimum>=1.20 · gptqmodel>=1.0 (또는 auto-gptq) · autoawq>=0.2
 pandas>=2.0
 numpy>=1.24
 scipy>=1.10

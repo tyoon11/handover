@@ -57,6 +57,10 @@ from .merging import merge_lora_for_vllm                         # noqa: E402
 from .prompt_utils import (                                      # noqa: E402
     SYSTEM_PROMPT, build_emr_text, fit_chat_prompt, fit_text_prompt, get_sid,
 )
+from .prompts_pairgen import (                                   # noqa: E402
+    JUDGE_TMPL as _JUDGE_TMPL, COVERAGE_RUBRIC as _COVERAGE_RUBRIC,
+    FIDELITY_BREVITY_RUBRIC as _FIDELITY_BREVITY_RUBRIC,
+)
 
 
 # ── few-shot 블록 (행별 로테이션 — T1) ──────────────────────────────────────
@@ -199,53 +203,7 @@ def dedup_clean_candidates(cands: list):
 
 
 # ── Judge (prometheus 계열 — reference-free, EMR 대비 채점: T2/T3/T4/T7) ────
-_JUDGE_TMPL = """###Task Description:
-An EMR-grounded evaluation. A source EMR (with intraoperative vital summary), a handoff
-response to evaluate, and a score rubric are given.
-1. Write brief feedback strictly based on the score rubric, judging ONLY against the EMR.
-2. After feedback, write a score (integer 1-5).
-3. Output format: "(feedback) [RESULT] (score)"
-4. No other opening or closing.
-
-###Source EMR (ground truth for this patient):
-{emr}
-
-###Intraoperative vital summary:
-{vital}
-
-###Response to evaluate:
-{response}
-
-###Score Rubric:
-{rubric}
-
-###Feedback:"""
-
-# T3 교정 핵심: '전부 놓치고 특이사항 없음'이 최고점이 되지 않도록 coverage 루브릭 신설
-_COVERAGE_RUBRIC = (
-    "Clinical coverage (recall of actionable abnormal findings). "
-    "Score 5: mentions ALL clinically actionable abnormal findings present in the EMR/vitals, "
-    "covering every one of the six mandatory groups that HAS a finding — comorbidity/medication, "
-    "airway management, intraoperative events and interventions, transfusion/fluids, abnormal "
-    "pre-op tests, recent URI (cold) status. Vital abnormalities must be QUANTIFIED with how long "
-    "they lasted and how far they deviated from the threshold (nadir/peak), e.g. "
-    "'20분간 저혈압(최저 55mmHg)'; a bare '저혈압' is incomplete. "
-    "Score 3: mentions the most critical findings but misses some, or reports vital abnormalities "
-    "without duration and nadir/peak. "
-    "Score 1: says '특이사항 없음' despite clear abnormal findings in the EMR, or misses most. "
-    "If the EMR truly has no meaningful abnormal findings, an exact '특이사항 없음' scores 5."
-)
-
-_FIDELITY_BREVITY_RUBRIC = (
-    "Fidelity and exception-based brevity. "
-    "Score 5: every statement is supported by the EMR/vitals, only abnormal findings are "
-    "mentioned, in 1-5 short formal Korean sentences. Duration and nadir/peak numbers attached to "
-    "an ABNORMAL vital finding are required content, NOT verbosity — never penalize them. "
-    "Score 3: minor unsupported details or mild verbosity. "
-    "Score 1: fabricates findings not in the EMR, states r/o as confirmed, or is dominated by "
-    "normal/routine/administrative content."
-)
-
+#   프롬프트 본문은 prompts_pairgen.py 한 벌 (v3.2)
 _RE_RESULT = re.compile(r"\[RESULT\]\s*\(?\s*([1-5])\s*\)?")
 
 
@@ -275,7 +233,7 @@ def judge_candidates(rows: list, cand_map: dict, backend: str):
             for name, rubric in (("cov", _COVERAGE_RUBRIC),
                                  ("fid", _FIDELITY_BREVITY_RUBRIC)):
                 def render(emr, _v=r["vital"], _c=cand, _rub=rubric):
-                    return _JUDGE_TMPL.format(emr=emr, vital=_v or "(없음)",
+                    return _JUDGE_TMPL.format(emr=emr, vital=_v or "(none)",
                                               response=_c, rubric=_rub)
                 prompt = fit_text_prompt(jtok, render, r["emr"], budget)
                 tasks.append((r["row_idx"], ci, name, prompt))

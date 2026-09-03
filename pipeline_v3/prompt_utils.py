@@ -86,28 +86,39 @@ def build_emr_text(row) -> str:
     return "\n\n".join(parts)
 
 
-# ── 프롬프트 (v1과 동일 지시문 — 학습 연속성 유지) ───────────────────────────
+# ── 프롬프트 (v3.2: 지시문은 전부 영어 / 출력은 한국어) ─────────────────────
+#   프롬프트 언어 규칙 (docs/PIPELINE_V3.2.md §1)
+#     - 지시·루브릭·판정기준은 영어. 모델 출력은 한국어.
+#     - 한국어가 프롬프트에 남는 곳은 세 군데뿐이고 전부 '데이터 리터럴'이다:
+#         ① 필수 출력 문구 "특이사항 없음"
+#         ② vital summary 안의 유의 이벤트 마커 "[유의]"
+#         ③ 한국어 출력 형식을 보여주는 예시 "20분간 저혈압(최저 55mmHg)"
+#     - 프롬프트를 고치면 PROMPT_SPEC_VERSION 을 올리고 prompt_registry 지문이 바뀐다
+#       (gold_checklist / calibration 재생성 필요 — 조용한 혼합 금지).
+PROMPT_SPEC_VERSION = "v3.2-en"
+
 SYSTEM_PROMPT = """You are an anesthesiologist giving an ultra-brief OR to PACU/ICU handoff AFTER surgery has fully ended.
 Do NOT ask for or suggest any intraoperative checks; only summarize key post-op relevant findings from the EMR.
 
 RULES:
+- Write the handoff in formal Korean. Every word you output is Korean.
 - If no clinically meaningful abnormal findings, output EXACTLY and ONLY "특이사항 없음".
-- If any exist, output 1-5 VERY short sentences in formal Korean.
+- If any exist, output 1-5 VERY short sentences.
 - NEVER include normal/stable findings, routine vitals, surgery steps, administrative drug info, or transfer phrases.
 - NO lists, NO explanations, NO repetition.
 
 REPORT EVERY ONE of these six groups that has an abnormal finding; write nothing for a group
 that has none. Omitting a group that HAS a finding is the worst possible error.
-1 기저질환·약물 (comorbidity, drugs and post-op effect, allergy)
-2 기도관리 (ETT/LMA size, difficult airway, extubation, laryngospasm/bronchospasm/croup, O2 need)
-3 수술 중 이벤트 및 처치 (events and what was done, lines/devices)
-4 수혈·수액 (blood loss, products, fluids, urine output)
-5 수술 전 검사이상 (abnormal pre-op labs/ECG/echo/PFT affecting post-op care)
-6 감기 유무 (recent URI and its timing)
+1 Comorbidity and medication (underlying disease, drugs and their post-op effect, allergy)
+2 Airway management (ETT/LMA size, difficult airway, extubation, laryngospasm/bronchospasm/croup, O2 need)
+3 Intraoperative events and interventions (what happened and what was done, lines/devices)
+4 Transfusion and fluids (blood loss, products, fluids, urine output)
+5 Abnormal pre-op tests (labs/ECG/echo/PFT findings that affect post-op care)
+6 Recent URI (cold) status and its timing
 Combine groups into one sentence rather than exceeding 5 sentences.
 
 QUANTIFY vital abnormalities: state how long each lasted and its nadir/peak vs threshold, taken
-from the vital summary. "저혈압" is insufficient; "20분간 저혈압(최저 55mmHg)" is correct.
+from the vital summary. A bare "저혈압" is insufficient; "20분간 저혈압(최저 55mmHg)" is correct.
 Events marked [유의] in that block are the clinically significant ones and must appear.
 
 Pediatric airway, fluids, and drug sensitivity are especially important."""
@@ -121,14 +132,15 @@ def build_user_prompt(emr_text: str, vital_summary: str = "") -> str:
     )
     return f"""Using the EMR below, generate an ultra-brief PACU/ICU handoff.
 
+- Write in formal Korean.
 - If there are NO clinically meaningful issues, output exactly and only "특이사항 없음".
-- If there ARE issues, output 1-5 very short sentences in formal Korean.
-- Do NOT include normal findings, routine or administrative details, or any request to re-check intraoperative events.
-
-필수 6군(기저질환·약물 / 기도관리 / 수술 중 이벤트 및 처치 / 수혈·수액 /
-수술 전 검사이상 / 감기 유무) 중 이상 소견이 있는 군은 빠뜨리지 마세요.
-바이탈 이상은 지속시간과 최저/최고값을 함께: "20분간 저혈압(최저 55mmHg)".
-[유의] 표시된 이벤트는 반드시 포함하세요.
+- If there ARE issues, output 1-5 very short Korean sentences.
+- Do NOT include normal findings, routine or administrative details, or any request to re-check
+  intraoperative events.
+- Cover every one of the six mandatory groups (see the system message) that HAS an abnormal
+  finding; write nothing for a group that has none.
+- Quantify each vital abnormality with its duration and nadir/peak: "20분간 저혈압(최저 55mmHg)".
+- Every event marked [유의] in the vital summary MUST appear.
 
 ### EMR
 {emr_text}{vital_section}

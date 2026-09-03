@@ -100,24 +100,73 @@ def load_khs_gold_override() -> dict:
 
 # ── 모델 레지스트리 (단일 소스 — 학습/추론/평가/다운로드가 전부 이걸 사용) ────
 # family: judge 순환 방지 규칙에 사용 — 평가 대상과 같은 family의 judge는 배정 금지 (T7)
+# size_gb = HF 실측 weight 용량 (2026-09-03 조회) — 다운로드 계획·디스크 점검용
+# role   = base(학습대상) / teacher(합성데이터) / judge(채점) — 한 모델이 여러 역할 가능
 MODELS = {
+    # ── 학습 베이스 ──────────────────────────────────────────────────────
     "llama":      dict(dir="Llama-3.1-8B-Instruct",  repo="meta-llama/Llama-3.1-8B-Instruct",
-                       family="llama",  thinking=False, gated=True),
+                       family="llama",  thinking=False, gated=True,  size_gb=16.1, role="base"),
     "qwen":       dict(dir="Qwen3-8B",               repo="Qwen/Qwen3-8B",
-                       family="qwen",   thinking=True,  gated=False),
+                       family="qwen",   thinking=True,  gated=False, size_gb=16.4, role="base"),
     "qwen35":     dict(dir="Qwen3.5-9B",             repo="Qwen/Qwen3.5-9B",
-                       family="qwen",   thinking=True,  gated=False),
+                       family="qwen",   thinking=True,  gated=False, size_gb=19.3, role="base"),
     "gemma4":     dict(dir="gemma-4-E4B-it",         repo="google/gemma-4-E4B-it",
-                       family="gemma",  thinking=False, gated=True),
+                       family="gemma",  thinking=False, gated=True,  size_gb=16.0, role="base"),
     "gemma4_31b": dict(dir="gemma-4-31B-it",         repo="google/gemma-4-31B-it",
-                       family="gemma",  thinking=False, gated=True),
+                       family="gemma",  thinking=False, gated=True,  size_gb=62.5, role="base"),
     "hari":       dict(dir="hari-q3-8b",             repo="snuh/hari-q3-8b",
-                       family="qwen",   thinking=True,  gated=False),
-    "medgemma27b": dict(dir="medgemma-27b-it",       repo="google/medgemma-27b-it",
-                       family="gemma",  thinking=False, gated=True),
+                       family="qwen",   thinking=True,  gated=False, size_gb=16.4, role="base"),
+
+    # ── teacher 후보 (합성데이터 생성 전용, 학습 대상 아님) ───────────────
+    #   qwen35_122b: Qwen3.5 MoE 122B / 활성 10B. 공식 GPTQ-Int4.
+    #                78.9GB → TP=2 로 2장(96GB)에 적재 가능(여유 ~17GB), TP=4 면 넉넉.
+    #                활성 10B라 속도가 27B dense급 — 품질/속도 균형 1안.
+    "qwen35_122b": dict(dir="Qwen3.5-122B-A10B-GPTQ-Int4",
+                        repo="Qwen/Qwen3.5-122B-A10B-GPTQ-Int4",
+                        family="qwen",  thinking=True,  gated=False, size_gb=78.9,
+                        quant="gptq", role="teacher"),
+    #   qwen35_27b : 같은 세대 dense. bf16 그대로 TP=2. 저렴한 대안.
+    "qwen35_27b": dict(dir="Qwen3.5-27B",            repo="Qwen/Qwen3.5-27B",
+                       family="qwen",   thinking=True,  gated=False, size_gb=55.6,
+                       role="teacher"),
+    #   qwen72b    : 구세대(2.5) dense 72B AWQ4. 41.6GB → TP=2 × 3인스턴스 여유.
+    "qwen72b":    dict(dir="Qwen2.5-72B-Instruct-AWQ",
+                       repo="Qwen/Qwen2.5-72B-Instruct-AWQ",
+                       family="qwen",   thinking=False, gated=False, size_gb=41.6,
+                       quant="awq", role="teacher"),
+
+    # ── judge 후보 ───────────────────────────────────────────────────────
+    #   prometheus  : 선호쌍 판정 확정(절대채점·pairwise 둘 다 학습된 모델).
+    #                 93.4GB → TP=4 필요 (TP=2 면 46.7GB/장으로 KV 여유 없음).
     "prometheus": dict(dir="prometheus-8x7b-v2.0",   repo="prometheus-eval/prometheus-8x7b-v2.0",
-                       family="mixtral", thinking=False, gated=False),
+                       family="mixtral", thinking=False, gated=False, size_gb=93.4,
+                       role="judge"),
+    #   mprometheus : 다국어 판정(20+개 언어, direct+pairwise). base=Qwen2.5-14B → family qwen.
+    #                 29.5GB → **1장에 적재** (판정 병렬화가 쉬워 비용이 크게 준다).
+    "mprometheus": dict(dir="M-Prometheus-14B",      repo="Unbabel/M-Prometheus-14B",
+                        family="qwen",  thinking=False, gated=False, size_gb=29.5,
+                        role="judge"),
+    "llama70b":   dict(dir="Llama-3.3-70B-Instruct-AWQ",
+                       repo="casperhansen/llama-3.3-70b-instruct-awq",
+                       family="llama",  thinking=False, gated=False, size_gb=39.8,
+                       quant="awq", role="judge"),
+    "medgemma27b": dict(dir="medgemma-27b-it",       repo="google/medgemma-27b-it",
+                        family="gemma", thinking=False, gated=True,  size_gb=54.9,
+                        role="judge"),
 }
+
+
+def model_size_gb(key: str) -> float:
+    return float(MODELS[key].get("size_gb", 0.0))
+
+
+def model_role(key: str) -> str:
+    return MODELS[key].get("role", "base")
+
+
+def model_quant(key: str):
+    """AWQ/GPTQ 등 양자화 포맷 (vLLM quantization 인자). 없으면 None(bf16)."""
+    return MODELS[key].get("quant")
 
 # gemma-4 계열: LoRA 타깃/attn 구현 특수처리 필요
 GEMMA4_BASES = {k for k, v in MODELS.items() if v["family"] == "gemma" and k != "medgemma27b"}
@@ -155,20 +204,57 @@ def is_thinking(key: str) -> bool:
 # 학습 대상 후보 (run_all_v3 --models choices)
 TRAIN_KEYS = ["llama", "qwen", "qwen35", "gemma4", "gemma4_31b", "hari"]
 
-# ── Judge 배정 (순환 금지, T7) ───────────────────────────────────────────────
-# 평가(최종/개발): 2-judge — 대상 모델과 다른 family의 judge만 채점에 반영.
-#   양쪽 다 다른 family면 두 judge 평균 + 일치도 보고.
-EVAL_JUDGES = ["gemma4_31b", "qwen35"]
-# 선호쌍 생성 judge: 평가 judge와도, 학습 대상과도 다른 계열(prometheus=mixtral)
+# ── Judge 배정 (v3.2: 전 모델 동일 패널, T7은 LOO 민감도로 대체) ──────────────
+#   v3.1: "평가 대상과 같은 family judge 제외" → 모델마다 채점자가 달라져 서로 다른 자로
+#          잰 값을 한 표에 놓고 순위를 매기게 됐다.
+#   v3.2: 패널을 고정하고 **전 모델·전 변형에 동일 적용**한다. 순환 우려는 데이터를 버리는
+#          방식(제외) 대신 **민감도 분석**으로 다룬다 — 같은 family judge를 뺀 LOO 재계산을
+#          항상 병기하고, 순위가 뒤집히면 "judge 편향 민감"으로 명시한다.
+#          (docs/PIPELINE_V3.2.md §6)
+EVAL_JUDGES = ["medgemma27b", "llama70b", "mprometheus"]
+# 패널 선발 후보 — 손상검출 벤치 + (가능하면) 전문의 채점으로 상위 3개를 고른다.
+EVAL_JUDGE_CANDIDATES = ["medgemma27b", "llama70b", "mprometheus", "gemma4_31b", "qwen35"]
+# 케이스별 최소 유효 judge 수. 이보다 적으면 그 케이스는 제외 (전원 성공 요구 아님).
+MIN_JUDGES_PER_CASE = 2
+# 패널 입장 조건 (eval_v3/calibrate.py 게이트) — 결과를 보기 전에 판정한다.
+JUDGE_ADMISSION = dict(min_spearman=0.4, max_parse_fail_ratio=0.10)
+# 패널 탈락 시 대체 후보 (같은 순서로 승계)
+EVAL_JUDGES_RESERVE = ["gemma4_31b", "qwen35"]
+# 판정자 평균의 실효 독립성 진단 (Kish n_eff). n_eff/k < 이 값이면 리포트에 경고를 띄운다.
+JUDGE_NEFF_WARN_RATIO = 0.5
+
+# 선호쌍 생성 judge: 평가 패널(mixtral/gemma/llama)과 겹치지 않는 유일한 계열 = qwen.
+#   prometheus가 평가 패널로 올라갔으므로 쌍 생성 judge를 비워줘야 한다 (순환 금지).
+#   teacher와 같은 가중치를 쓰지만, DPO 쌍의 후보는 **학생 정책의 출력**이라 자기채점이 아니다.
+#   (SFT 타깃 선별 단계만 자기채점 성격이 남고, 이는 규칙 게이트 + 사람 검토로 보완한다)
 PAIRGEN_JUDGE = "prometheus"
+
+# 합성데이터 teacher (SFT 타깃 생성 전용 — DPO 쌍은 on-policy 유지)
+#   선발전(teacher bake-off) 결과로 확정한다. 후보: qwen35_122b / qwen35_27b / qwen72b
+TEACHER_KEY = "qwen35_122b"
+TEACHER_CANDIDATES = ["qwen35_122b", "qwen35_27b", "qwen72b"]
+
+# gold checklist 구조화 추출기. 채점 judge가 아니라 '교수님 GT → 항목' 변환기다.
+#   v3.1은 EVAL_JUDGES[0] 을 썼는데, v3.2 패널 1번은 prometheus(엄격 JSON 취약)라
+#   기본값으로 부적합해졌다 → 가장 강한 instruct 모델을 명시적으로 지정한다.
+CHECKLIST_EXTRACTOR = "qwen35_122b"
 
 
 def judges_for(target_model_key: str) -> list:
-    """평가 대상 모델에 배정 가능한 judge 목록 (같은 family 제외).
-    전부 제외되면 전체 judge를 쓰되 same_family 플래그는 호출부에서 기록."""
+    """평가에 사용할 judge 목록 — v3.2는 **대상과 무관하게 전체 패널**을 돌려준다.
+
+    같은 family judge를 제외하지 않는다(채점 기준 균일성). family 중복 정보는
+    same_family_judges 로 리포트에 남기고 LOO 민감도 분석에 쓴다.
+    """
+    return list(EVAL_JUDGES)
+
+
+def same_family_judges(target_model_key: str) -> list:
+    """대상 모델과 같은 family인 패널 judge (LOO 민감도 분석용 — 제외용이 아니다)."""
     fam = model_family(target_model_key) if target_model_key in MODELS else None
-    valid = [j for j in EVAL_JUDGES if fam is None or model_family(j) != fam]
-    return valid if valid else list(EVAL_JUDGES)
+    if fam is None:
+        return []
+    return [j for j in EVAL_JUDGES if model_family(j) == fam]
 
 
 # ── 토큰 예산 (단일 소스 — 학습/추론/쌍생성 전부 이 값, T4/T5/T6) ────────────
@@ -243,6 +329,13 @@ PAIRGEN = dict(
 # ── 데이터 split (T1: few-shot 유출 차단 / Phase3: dev-test 분리) ────────────
 SPLIT_SEED = 42
 N_FEWSHOT_POOL = 40             # RLHF 150 중 few-shot 예시 전용
+
+# v3.2: GT(전문의 인계문)를 few-shot 예시로 쓴다. GT는 gold 22건에만 있으므로
+#   gold 를 **GT few-shot 6 / 최종 test 16** 으로 분할한다 (docs/PIPELINE_V3.2.md §3).
+#   - 6건은 SFT 타깃 생성(teacher) 프롬프트의 few-shot 예시로만 쓰인다.
+#   - 16건은 추론·평가·리포트 대상. 두 집합의 교집합은 assert 로 차단한다.
+#   - test n=22 → 16 이므로 검정력이 떨어진다. 리포트에 반드시 명시할 것.
+N_GOLD_GT_FEWSHOT = 6
 # 나머지 110 = dev set (모델 선택/하이퍼파라미터 결정은 dev로만; gold 22는 최종 1회)
 
 # ── 평가 v3 ─────────────────────────────────────────────────────────────────
