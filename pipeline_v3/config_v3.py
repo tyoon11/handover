@@ -52,6 +52,9 @@ SFT_SRC_PKL = DATA_DIR / "preprocessed/jsft_251008.pkl"             # 2736×228 
 SELFJUDGE_SRC_PKL = DATA_DIR / "preprocessed/selfjudge_251008.pkl"  # 2736×228 — DPO 쌍 생성 원천 (SFT와 분리, T9)
 RLHF_PKL = DATA_DIR / "preprocessed/rlhf_251008.pkl"                # 150×228 — few-shot pool + dev set (T1)
 VITAL_MAP_PKL = DATA_DIR / "vital_summary_map.pkl"                  # {수술ID: vital_summary}
+# v3.2 — 바이탈 이벤트 구조화 감사본 {수술ID: {reportable:[...], minor:[...]}}.
+#   REPORTABLE/MINOR 판정 근거(R1~R4)를 담아 컷오프 튜닝·PPV 감사에 쓴다 (§7b.7).
+VITAL_AUDIT_PKL = DATA_DIR / "vital_events_audit.pkl"
 
 # v3 생성 산출물 (DATA_DIR가 아니라 run 출력 밑에 둔다 — run 간 오염 방지)
 PAIRS_SFT_PKL = PAIRS_OUT / "pairs_sft.pkl"           # SFT 타깃 (chosen만 사용)

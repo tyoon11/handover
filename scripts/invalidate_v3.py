@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline_v3.config_v3 import (      # noqa: E402
     EVAL_OUT, GOLD_CHECKLIST_JSON, INFER_OUT, PAIRS_OUT, REPORT_OUT,
-    RLAIF_OUT, SFT_OUT, VITAL_MAP_PKL, DATA_DIR,
+    RLAIF_OUT, SFT_OUT, VITAL_AUDIT_PKL, VITAL_MAP_PKL, DATA_DIR,
 )
 
 PREP = DATA_DIR / "preprocessed"
@@ -35,9 +35,9 @@ PREP = DATA_DIR / "preprocessed"
 # scope → (설명, 경로들, 무효 사유)
 SCOPES = {
     "vital": (
-        "바이탈 요약 맵",
-        [VITAL_MAP_PKL],
-        "임계값 전면 개정(2-tier·지속시간·편차) — 재생성 필수",
+        "바이탈 요약 맵 + 이벤트 감사본",
+        [VITAL_MAP_PKL, VITAL_AUDIT_PKL],
+        "v3.2 요약 재설계(REPORTABLE/MINOR 3블록 · R1~R4 · baseline 게이트) — 재생성 필수",
     ),
     "checklist": (
         "gold checklist",

@@ -91,11 +91,11 @@ def build_emr_text(row) -> str:
 #     - 지시·루브릭·판정기준은 영어. 모델 출력은 한국어.
 #     - 한국어가 프롬프트에 남는 곳은 세 군데뿐이고 전부 '데이터 리터럴'이다:
 #         ① 필수 출력 문구 "특이사항 없음"
-#         ② vital summary 안의 유의 이벤트 마커 "[유의]"
+#         ② vital summary 블록 안의 한국어 소견 텍스트 (요약기가 만든 데이터)
 #         ③ 한국어 출력 형식을 보여주는 예시 "20분간 저혈압(최저 55mmHg)"
 #     - 프롬프트를 고치면 PROMPT_SPEC_VERSION 을 올리고 prompt_registry 지문이 바뀐다
 #       (gold_checklist / calibration 재생성 필요 — 조용한 혼합 금지).
-PROMPT_SPEC_VERSION = "v3.2-en"
+PROMPT_SPEC_VERSION = "v3.2-en+vital3blk"
 
 SYSTEM_PROMPT = """You are an anesthesiologist giving an ultra-brief OR to PACU/ICU handoff AFTER surgery has fully ended.
 Do NOT ask for or suggest any intraoperative checks; only summarize key post-op relevant findings from the EMR.
@@ -117,9 +117,13 @@ that has none. Omitting a group that HAS a finding is the worst possible error.
 6 Recent URI (cold) status and its timing
 Combine groups into one sentence rather than exceeding 5 sentences.
 
-QUANTIFY vital abnormalities: state how long each lasted and its nadir/peak vs threshold, taken
-from the vital summary. A bare "저혈압" is insufficient; "20분간 저혈압(최저 55mmHg)" is correct.
-Events marked [유의] in that block are the clinically significant ones and must appear.
+VITAL SUMMARY — it has two blocks and you treat them differently.
+- "VITAL — REPORTABLE": every line here is a handoff-worthy finding and MUST appear in your output.
+  Keep its duration and nadir/peak numbers: a bare "저혈압" is insufficient,
+  "20분간 저혈압(최저 55mmHg)" is correct. If a line names an intervention (개입), report that too.
+- "VITAL — AT HANDOFF": the patient's state as surgery ended. Report it ONLY where it is still
+  abnormal or some support is ongoing (oxygen, vasopressor). Do not recite normal closing numbers.
+Say nothing else about vitals. If REPORTABLE says there is none, do not discuss vitals at all.
 
 Pediatric airway, fluids, and drug sensitivity are especially important."""
 
@@ -139,8 +143,10 @@ def build_user_prompt(emr_text: str, vital_summary: str = "") -> str:
   intraoperative events.
 - Cover every one of the six mandatory groups (see the system message) that HAS an abnormal
   finding; write nothing for a group that has none.
-- Quantify each vital abnormality with its duration and nadir/peak: "20분간 저혈압(최저 55mmHg)".
-- Every event marked [유의] in the vital summary MUST appear.
+- Report EVERY line of "VITAL — REPORTABLE", keeping its duration and nadir/peak numbers
+  ("20분간 저혈압(최저 55mmHg)") and any intervention it names.
+- From "VITAL — AT HANDOFF", report only what is still abnormal or still being supported.
+- Say nothing else about vitals.
 
 ### EMR
 {emr_text}{vital_section}

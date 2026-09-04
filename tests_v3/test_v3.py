@@ -139,9 +139,16 @@ def test_uniform_judge_panel():
     )
     for target in ("llama", "qwen", "qwen35", "gemma4", "gemma4_31b", "hari"):
         assert judges_for(target) == EVAL_JUDGES, f"{target} 의 채점자가 패널과 다르다"
-    # family 중복은 '제외'가 아니라 LOO 민감도용 정보로만 남는다
+    # family 중복은 '제외'가 아니라 LOO 민감도용 정보로만 남는다.
+    #   확정 패널(medgemma27b/llama70b/mprometheus)은 세 계열이 학생과 각각 겹친다.
+    #   특히 mprometheus(=M-Prometheus-14B, Qwen2.5 기반)는 teacher(qwen)와도 같은 계열이라
+    #   LOO 민감도 보고가 필수다 (§2.3 / §6.4).
     assert same_family_judges("llama") == ["llama70b"]
-    assert same_family_judges("qwen") == []
+    assert same_family_judges("gemma4") == ["medgemma27b"]
+    assert same_family_judges("qwen") == ["mprometheus"]
+    from pipeline_v3.config_v3 import model_family as _mf
+    assert _mf(TEACHER_KEY) in {_mf(j) for j in EVAL_JUDGES}, \
+        "teacher 계열이 패널에서 사라졌다면 §2.3 주석을 갱신해야 한다"
     # 순환 금지: 쌍 생성 judge 는 평가 패널에 없어야 한다
     assert PAIRGEN_JUDGE not in EVAL_JUDGES
     # teacher 도 평가 패널에 없어야 한다 (자기 출력을 배운 학생을 자기가 채점)
@@ -177,9 +184,15 @@ def test_prompts_are_english_and_fingerprinted():
         assert n_ko < 40, f"{name} 에 한국어 지시문이 남아있다 ({n_ko}자)"
     # 필수 리터럴은 반드시 살아있어야 한다
     assert "특이사항 없음" in prompts["gen.system"]
-    assert "[유의]" in prompts["gen.system"]
+    assert "20분간 저혈압" in prompts["gen.system"], "한국어 출력 형식 예시가 사라졌다"
+    # v3.2 §7b: 바이탈은 블록 구조로 지시한다 ([유의] 마커는 폐기)
+    for blk in ("VITAL — REPORTABLE", "VITAL — AT HANDOFF"):
+        assert blk in prompts["gen.system"], f"{blk} 지시가 없다"
+        assert blk in prompts["gen.user"], f"{blk} 지시가 user 프롬프트에 없다"
+    assert "[유의]" not in prompts["gen.system"], \
+        "폐기된 [유의] 마커가 프롬프트에 남아있다 (요약기는 더 이상 만들지 않는다)"
     fp = fingerprint()
-    assert fp["spec_version"] == "v3.2-en" and len(fp["sha1"]) == 16
+    assert fp["spec_version"].startswith("v3.2-en") and len(fp["sha1"]) == 16
     assert_same(fp)                       # 자기 자신과는 통과
     bad = dict(fp, sha1="deadbeefdeadbeef")
     try:
@@ -266,6 +279,44 @@ def test_fit_prompt_fails_loud_when_budget_impossible():
         raise AssertionError("예산 불가능인데 조용히 통과")
     except PromptTruncationError:
         pass
+
+
+# ── 바이탈 판정 규칙 (v3.2 §7b) ─────────────────────────────────────────────
+def test_vital_report_rules():
+    """R1~R4 · baseline 게이트 · 계획된 저체온이 의도대로 동작하는지.
+
+    utils/vital_summarizer.selftest() 가 합성 시계열로 11개 조건을 검증한다.
+    pandas가 없는 환경(순수 문서 작업용)에서는 skip.
+    """
+    try:
+        import pandas  # noqa: F401
+    except ImportError:
+        print("    (pandas 없음 — skip)")
+        return
+    from utils.vital_summarizer import RULE_DIAG, selftest
+    RULE_DIAG.clear()
+    assert selftest(verbose=False), "바이탈 판정 규칙 selftest 실패"
+    # 규칙이 실제로 걸러내고 있어야 한다 (전부 REPORTABLE이면 v3.1과 같다)
+    assert RULE_DIAG.get("events_minor", 0) > 0, "MINOR로 내려간 이벤트가 없다"
+
+
+def test_vital_intervention_matching():
+    """R1 개입 연동 — 가온·최초삽관은 승격시키지 않는다 (오탐 원인)."""
+    from utils.anesthetic_record import (
+        extract_interventions, match_interventions,
+    )
+    rec = ("▶09:00 Start monitoring / 적극적 가온적용\n"
+           "▶09:10 Intubation with AuraGain #3 without difficulty\n"
+           "▶09:35 BP 55/30 → Ephedrine 3mg ivs\n"
+           "▶10:05 HR 48 → Atropine 0.1mg ivs")
+    iv = extract_interventions(rec)
+    assert match_interventions("hypotension", [9 * 60 + 35], iv), "승압제 매칭 실패"
+    assert match_interventions("bradycardia", [10 * 60 + 5], iv), "아트로핀 매칭 실패"
+    assert not match_interventions("hypothermia", [9 * 60], iv), "가온이 승격시켰다"
+    assert not match_interventions("desaturation", [9 * 60 + 10], iv), \
+        "최초 삽관이 승격시켰다"
+    # 시간이 멀면 매칭 안 됨
+    assert not match_interventions("hypotension", [8 * 60], iv), "시간창 무시됨"
 
 
 # ── 단독 실행 러너 ──────────────────────────────────────────────────────────

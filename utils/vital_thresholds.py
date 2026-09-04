@@ -273,3 +273,87 @@ def implausible_mask(item: str, values):
         return values != values          # 전부 False
     lo, hi = rng
     return (values < lo) | (values > hi)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# v3.2 — 인계 대상 판정 규칙 (REPORTABLE / MINOR)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 왜 필요한가 (docs/PIPELINE_V3.2.md §7b)
+#   v3.1까지는 "임계값을 넘은 표본이 1개라도 있으면 이벤트"였다. NIBP가 한 번
+#   55mmHg면 `[유의]저혈압: 1회 <1분` 이 되고, 프롬프트가 "[유의]는 반드시 포함"
+#   이라 모델이 반드시 쓴다. 그래서 인계문이 바이탈로 쏠렸다(바이탈 편향).
+#
+# 원칙: 인계문에 들어갈 바이탈은 다음 중 하나여야 한다.
+#   R1 개입 동반   — 이벤트 시각 ±10분에 대응 처치가 있었다 (의사가 반응했다)
+#   R2 지속×심도   — 최장 episode ≥ 10분(또는 2표본) AND 편차 ≥ 항목별 최소편차
+#                    AND (해당 항목이면) baseline 대비 하락 조건
+#   R3 종료 지속   — 마지막 15분 창에서도 위반 (인계 시점에 남아 있는 문제)
+#   R4 절대 위험선 — 1표본이라도 무조건 (짧아도 보고해야 하는 값)
+#   그 외 = MINOR (감사 로그 전용, 프롬프트에 넣지 않는다)
+
+VITAL_REPORT_RULES = dict(
+    min_longest_min=10.0,       # R2 최장 episode 하한(분)
+    min_samples=2,              # R2 대안 — 연속 2표본 이상
+    handoff_window_min=15.0,    # R3 / AT HANDOFF 블록의 창
+    baseline_window_min=10.0,   # baseline = 기록 시작 후 이 창의 중앙값
+    baseline_min_samples=3,     # 표본이 이보다 적으면 baseline 없음으로 취급
+    intervention_window_min=10.0,   # R1 시각 매칭 허용오차(±분)
+)
+
+# R2 최소 편차 — 기준선을 '살짝' 벗어난 것은 등재하지 않는다.
+#   근거: 두 교과서에 소아 최소편차 기준은 없다. NIBP 측정오차(±5mmHg 내외)와
+#   자동 QTc 계산 변동을 넘는 선에서 보수적으로 잡은 **운영값**이다 (§7b.7의
+#   GT 대조 PPV로 재조정할 대상 — 교과서 전거가 아님을 명시).
+MIN_DEVIATION = {
+    "HR": 10.0, "SBP": 10.0, "MBP": 10.0, "DBP": 10.0,
+    "ISBP1": 10.0, "IMBP1": 10.0, "IDBP1": 10.0,
+    "SpO2": 3.0, "T1": 0.5, "QTc": 20.0,
+}
+
+# baseline 대비 하락 조건 — 이 항목의 '저하' 이벤트는 절대기준 위반만으로는 부족하고
+# baseline 대비 하락도 있어야 R2를 통과한다. baseline이 없으면 이 조건은 건너뛴다.
+#   이유: 이 코호트는 소아 심장수술을 포함한다. 청색성 심질환의 기저 SpO2 75%,
+#   단심실의 기저 저혈압은 '수술 중 발생한 사건'이 아니라 그 환자의 평소 상태다.
+#   ("rel", 0.20) = baseline 대비 20% 이상 하락 / ("abs", 5.0) = 5단위 이상 하락
+#   체온·SpO2에 비율을 쓰면 안 된다 (36.5°C의 20% = 7.3°C, 99%의 20% = 19.8%p).
+BASELINE_DROP_REQUIRED = {
+    "SBP": ("rel", MAP_RELATIVE_DROP), "ISBP1": ("rel", MAP_RELATIVE_DROP),
+    "MBP": ("rel", MAP_RELATIVE_DROP), "IMBP1": ("rel", MAP_RELATIVE_DROP),
+    "SpO2": ("abs", 5.0),
+    "T1": ("abs", 1.0),
+}
+
+
+def hard_lines(item: str, age: float):
+    """R4 절대 위험선 (low_lt, high_gt). 해당 없으면 None.
+
+    "1표본이라도 무조건 보고" 선이므로 통상 기준보다 **더 낮게/높게** 잡는다.
+    혈압은 PALS 저혈압 기준의 70% (신생아 42 / 영아 49 / 5세 56 …).
+    """
+    if item == "HR":
+        _, tachy = hr_critical_range(age)
+        return (50.0, tachy + 30.0)
+    if item in ("SBP", "ISBP1"):
+        return (0.7 * sbp_hypotension(age), None)
+    if item in ("MBP", "IMBP1"):
+        return (0.7 * map_hypotension(age), None)
+    if item == "SpO2":
+        return (80.0, None)
+    if item == "T1":
+        return (34.0, 39.0)
+    if item == "QTc":
+        return (None, 500.0)
+    return None
+
+
+# 계획된 저체온 — CPB/DHCA 케이스는 저체온이 '이상'이 아니라 시술의 일부다.
+# 마취기록에 이 키워드가 있으면 저체온 이벤트를 나열하지 않고 상태 한 줄로 표기한다.
+PLANNED_HYPOTHERMIA_KEYWORDS = [
+    "cpb", "체외순환", "심폐순환", "cardiopulmonary bypass", "dhca",
+    "deep hypothermic", "bypass on", "aortic cross", "acc on",
+]
+
+
+def has_planned_hypothermia(record_text: str) -> bool:
+    low = (record_text or "").lower()
+    return any(k in low for k in PLANNED_HYPOTHERMIA_KEYWORDS)

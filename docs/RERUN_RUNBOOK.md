@@ -1,5 +1,9 @@
 # v3.1 재실행 런북
 
+> **⚠ v3.2에서는 [RUNBOOK_V3.2.md](RUNBOOK_V3.2.md) 를 따르세요.**
+> 이 문서에서 아직 유효한 것은 **§1 교수님 재검수 GT 반영 절차**뿐이고
+> (이미 적용 완료 — `khs_gold_override.json` 22건), 나머지 순서는 v3.2 런북이 대체합니다.
+
 임계값 개정([THRESHOLDS.md](THRESHOLDS.md)) · 필수 항목군 도입([REQUIRED_CATEGORIES.md](REQUIRED_CATEGORIES.md)) ·
 바이탈 이벤트 정량화 · 교수님 재검수 GT 반영 이후 전체 재실행 절차.
 
