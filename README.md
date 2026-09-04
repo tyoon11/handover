@@ -104,6 +104,40 @@ python utils/download_models.py --probe-proxy
 `example.com` 결과가 기본정책을 알려준다 — 통과하면 allowlist 방식이 **아니므로**
 "허용목록 추가"가 아니라 "해당 호스트/대역 차단 해제"로 요청해야 한다.
 
+### 로컬 PC에서 받아 옮기기 (프록시가 안 열릴 때)
+
+프록시가 `us.aws.cdn.hf.co` 를 막으면 폐쇄망에서 받을 방법이 없다. 인터넷 되는 PC에서 받아
+외장 디스크로 옮기고 **해시로 검증**한다 (수십 GB 샤드는 잘려 들어와도 로드는 되고 추론만
+이상해지므로 크기 비교로는 부족하다).
+
+받는 쪽 (예: macOS + 외장 SSD):
+
+```bash
+pip install -U huggingface_hub hf_transfer
+export HANDOVER_MODEL_DIR=/Volumes/T7/local_models
+export HF_HUB_ENABLE_HF_TRANSFER=1        # 직결 인터넷에서만 (프록시 환경에선 쓰지 말 것)
+
+M="qwen35_122b mprometheus llama70b"      # 148GB. teacher 선발전까지 하려면 + qwen72b
+python utils/download_models.py --models $M --check
+python utils/download_models.py --models $M
+python utils/download_models.py --models $M --checksums write
+```
+
+옮긴 쪽 (폐쇄망 서버):
+
+```bash
+rsync -a --info=progress2 /mnt/T7/local_models/ /home/coder/workspace/data/local_models/
+export HANDOVER_MODEL_DIR=/home/coder/workspace/data/local_models
+python utils/download_models.py --models $M --checksums verify   # 불일치는 exit 1
+python utils/download_models.py --group all --check
+```
+
+- 외장 디스크가 **FAT32면 4GB 파일 제한**에 걸린다. exFAT/APFS/ext4 를 쓸 것
+  (`diskutil info /Volumes/T7 | grep -i personality`).
+- `--checksums verify` 는 누락·해시불일치를 파일 단위로 지적한다. 불일치 파일만 재전송하면 된다.
+- gated 모델(llama·gemma4·gemma4_31b·medgemma27b)은 HF 라이선스 동의 + `HF_TOKEN` 이 필요하지만,
+  현재 미보유 5종(teacher 3후보·mprometheus·llama70b)은 **전부 public** 이라 토큰이 필요 없다.
+
 필요 데이터(서버 `DATA_DIR`에 있어야 함): v1과 동일한 pkl들
 (`gold_sampled_251008.pkl`, `jsft_251008.pkl`, `selfjudge_251008.pkl`, `rlhf_251008.pkl`,
 `vital_summary_map.pkl`) + `gold_sampled/인계요약지_gold_sampled_251002_KHS.xlsx`

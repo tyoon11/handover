@@ -633,6 +633,101 @@ def probe_cdn(verify, repo: str = None, timeout: int = 20) -> bool:
         return False
 
 
+CHECKSUM_FILE = "checksums.sha256"
+
+
+def _iter_model_files(key: str):
+    """모델 디렉토리의 실제 파일들 (HF 내부 캐시·체크섬 파일 제외)."""
+    d = model_path(key)
+    for f in sorted(d.rglob("*")):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(d)
+        if rel.parts and rel.parts[0] == ".cache":
+            continue
+        if rel.name == CHECKSUM_FILE:
+            continue
+        yield f, rel
+
+
+def _sha256(path: Path, chunk: int = 8 * 1024 * 1024) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            b = f.read(chunk)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
+
+
+def checksums(keys, mode: str) -> bool:
+    """물리 이동(외장SSD 등) 전후 무결성 검증.
+
+    write : 받은 쪽에서 모델별 checksums.sha256 생성 (sha256sum 호환 포맷)
+    verify: 옮긴 쪽에서 대조. 누락·크기불일치·해시불일치를 각각 구분해 보고한다.
+
+    왜 필요한가: 수십 GB 샤드가 잘려 들어와도 로드는 되고 추론만 이상해지는 경우가 있다.
+    크기 비교(--check)로는 못 잡는 손상이 있어 이동 경로에는 해시가 필요하다.
+    """
+    import time as _t
+    ok_all = True
+    for key in keys:
+        d = model_path(key)
+        if not d.exists():
+            print(f"  [{key}] 폴더 없음 — 건너뜀")
+            ok_all = False
+            continue
+        cf = d / CHECKSUM_FILE
+        files = list(_iter_model_files(key))
+        total = sum(f.stat().st_size for f, _ in files)
+        print(f"\n  ▶ {key}  {len(files)}개 파일 {total / 1e9:.1f} GB  ({mode})")
+        t0 = _t.time()
+
+        if mode == "write":
+            lines = []
+            for i, (f, rel) in enumerate(files, 1):
+                lines.append(f"{_sha256(f)}  {rel.as_posix()}")
+                print(f"\r    [{i}/{len(files)}] {rel.as_posix()[:60]:<60}", end="", flush=True)
+            cf.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            print(f"\r    ✓ {cf} ({len(lines)}개, {(_t.time() - t0) / 60:.1f}분)"
+                  f"{' ' * 30}")
+            continue
+
+        if not cf.exists():
+            print(f"    ✗ {CHECKSUM_FILE} 없음 — 받은 쪽에서 --checksums write 먼저 실행")
+            ok_all = False
+            continue
+        want = {}
+        for line in cf.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            h, _, rel = line.partition("  ")
+            want[rel.strip()] = h.strip()
+        have = {rel.as_posix(): f for f, rel in files}
+        missing = [r for r in want if r not in have]
+        extra = [r for r in have if r not in want]
+        bad = []
+        for i, (rel, h) in enumerate(sorted(want.items()), 1):
+            if rel in missing:
+                continue
+            print(f"\r    [{i}/{len(want)}] {rel[:60]:<60}", end="", flush=True)
+            if _sha256(have[rel]) != h:
+                bad.append(rel)
+        print(f"\r    {'✓' if not (missing or bad) else '✗'} "
+              f"검증 {len(want) - len(missing) - len(bad)}/{len(want)} 일치 "
+              f"({(_t.time() - t0) / 60:.1f}분){' ' * 30}")
+        for r in missing:
+            print(f"      · 누락 {r}")
+        for r in bad:
+            print(f"      · 해시 불일치 {r}  ← 재전송 필요")
+        for r in extra:
+            print(f"      · (목록에 없는 파일 {r})")
+        ok_all = ok_all and not (missing or bad)
+    return ok_all
+
+
 def _proxy_url() -> str:
     """HTTPS 용 프록시 URL (없으면 빈 문자열). 폐쇄망 컨테이너는 직결이 없다."""
     for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
@@ -737,6 +832,8 @@ def main():
                          "--probe-cdn 으로 도달성을 먼저 확인할 것)")
     ap.add_argument("--probe-cdn", dest="probe_cdn", nargs="?", const=None, default=False,
                     help="대용량 파일 리다이렉트 체인과 CDN 도달성을 시험 (repo 지정 가능)")
+    ap.add_argument("--checksums", choices=["write", "verify"], default=None,
+                    help="물리 이동 무결성: write(받은 쪽에서 생성) / verify(옮긴 쪽에서 대조)")
     ap.add_argument("--probe-proxy", dest="probe_proxy", nargs="*", default=None,
                     help="프록시 허용 정책 진단: 호스트별 CONNECT 응답(403=ACL거부 / "
                          "무응답=상단 방화벽). 호스트 나열 가능")
@@ -774,6 +871,8 @@ def main():
     print(f"[대상] {len(targets)}개: {', '.join(targets)}")
 
     MODEL_BASE.mkdir(parents=True, exist_ok=True)
+    if args.checksums:
+        sys.exit(0 if checksums(targets, args.checksums) else 1)
     need = print_plan(targets)
     if args.check:
         return
