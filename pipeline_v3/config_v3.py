@@ -264,7 +264,9 @@ def model_downloaded(key: str) -> bool:
     d = model_path(key)
     if not (d / "config.json").exists():
         return False
-    w = list(d.rglob("*.safetensors")) + list(d.rglob("*.bin"))
+    # macOS 사이드카(._xxx.safetensors)는 실제 가중치가 아니다 — 세지 않는다
+    w = [f for f in (list(d.rglob("*.safetensors")) + list(d.rglob("*.bin")))
+         if not f.name.startswith("._")]
     if not w:
         return False
     want = model_size_gb(key)

@@ -132,6 +132,11 @@ python utils/download_models.py --models $M --checksums verify   # 불일치는 
 python utils/download_models.py --group all --check
 ```
 
+- **macOS + exFAT 은 `._*` 사이드카(AppleDouble)를 만든다.** 모델 내용이 아니고 전송 중
+  사라지거나 새로 생겨 verify 오탐을 낸다. 스크립트가 해시·용량 계산에서 제외하지만,
+  옮기기 전에 지우고 rsync 에서도 빼는 게 깔끔하다:
+  `find /Volumes/T7/local_models -name '._*' -delete`
+  / `rsync -a --exclude='._*' --exclude='.DS_Store' ...`
 - 외장 디스크가 **FAT32면 4GB 파일 제한**에 걸린다. exFAT/APFS/ext4 를 쓸 것
   (`diskutil info /Volumes/T7 | grep -i personality`).
 - `--checksums verify` 는 누락·해시불일치를 파일 단위로 지적한다. 불일치 파일만 재전송하면 된다.

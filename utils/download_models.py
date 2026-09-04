@@ -74,6 +74,39 @@ IGNORE_PATTERNS = ["*.msgpack", "*.h5", "flax_model*", "tf_model*",
 MANIFEST = "download_manifest.json"
 
 
+def _stored_token_path() -> Path:
+    """HF CLI 가 토큰을 저장하는 표준 위치. env 로 옮겨졌으면 그쪽."""
+    if os.environ.get("HF_TOKEN_PATH"):
+        return Path(os.environ["HF_TOKEN_PATH"])
+    home = os.environ.get("HF_HOME") or str(Path.home() / ".cache" / "huggingface")
+    return Path(home) / "token"
+
+
+def resolve_token(cli_token: str = None):
+    """(token, 출처설명) — 토큰 값은 절대 출력하지 않는다.
+
+    우선순위: --token > HF_TOKEN/HUGGING_FACE_HUB_TOKEN env > 저장 파일.
+    저장 파일이 있으면 huggingface_hub 가 token=None 으로도 알아서 쓰지만,
+    '토큰 없음'이라고 잘못 안내하지 않도록 여기서 같이 확인한다.
+    """
+    if cli_token:
+        return cli_token, "--token 인자"
+    for env in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        v = os.environ.get(env)
+        if v:
+            return v, f"env {env}"
+    tp = _stored_token_path()
+    try:
+        if tp.exists():
+            v = tp.read_text(encoding="utf-8").strip()
+            if v:
+                return v, f"저장 파일 {tp}"
+    except Exception:
+        pass
+    return None, ("없음 — public 모델만. 미인증은 rate limit 이 걸려 느리다.\n"
+                  f"           토큰 저장: printf '%s' '<hf_토큰>' > {tp} && chmod 600 {tp}")
+
+
 def group_keys(group: str) -> list:
     if group == "all":
         return list(MODELS)
@@ -94,7 +127,8 @@ def check_status(key: str):
         return False, "폴더 없음", 0.0
     if not (d / "config.json").exists():
         return False, "config.json 없음", 0.0
-    weights = list(d.rglob("*.safetensors")) + list(d.rglob("*.bin"))
+    weights = [f for f in (list(d.rglob("*.safetensors")) + list(d.rglob("*.bin")))
+               if not _is_junk(f.relative_to(d))]
     if not weights:
         return False, "weight 파일 없음", 0.0
     gb = sum(f.stat().st_size for f in weights) / 1e9
@@ -636,8 +670,22 @@ def probe_cdn(verify, repo: str = None, timeout: int = 20) -> bool:
 CHECKSUM_FILE = "checksums.sha256"
 
 
+# macOS 가 exFAT/FAT 에 만드는 사이드카·메타 파일. 모델 내용이 아니고 전송 중 사라지거나
+# 새로 생기므로 해시 대상에서 제외한다 (안 하면 verify 가 대량 오탐을 낸다).
+MAC_JUNK_PREFIXES = ("._",)
+MAC_JUNK_NAMES = {".DS_Store", ".Spotlight-V100", ".fseventsd", ".Trashes",
+                  ".TemporaryItems", ".apdisk"}
+
+
+def _is_junk(rel: Path) -> bool:
+    for part in rel.parts:
+        if part.startswith(MAC_JUNK_PREFIXES) or part in MAC_JUNK_NAMES:
+            return True
+    return False
+
+
 def _iter_model_files(key: str):
-    """모델 디렉토리의 실제 파일들 (HF 내부 캐시·체크섬 파일 제외)."""
+    """모델 디렉토리의 실제 파일들 (HF 내부 캐시·체크섬 파일·macOS 사이드카 제외)."""
     d = model_path(key)
     for f in sorted(d.rglob("*")):
         if not f.is_file():
@@ -645,7 +693,7 @@ def _iter_model_files(key: str):
         rel = f.relative_to(d)
         if rel.parts and rel.parts[0] == ".cache":
             continue
-        if rel.name == CHECKSUM_FILE:
+        if rel.name == CHECKSUM_FILE or _is_junk(rel):
             continue
         yield f, rel
 
@@ -865,9 +913,8 @@ def main():
     _configure_http(verify)
 
     targets = args.models or group_keys(args.group or "v32")
-    token = (args.token or os.environ.get("HF_TOKEN")
-             or os.environ.get("HUGGING_FACE_HUB_TOKEN"))
-    print(f"[인증] {'HF 토큰 사용 ' + token[:6] + '...' if token else '토큰 없음 (public 만)'}")
+    token, src = resolve_token(args.token)
+    print(f"[인증] {'토큰 사용 (' + src + ')' if token else '토큰 ' + src}")
     print(f"[대상] {len(targets)}개: {', '.join(targets)}")
 
     MODEL_BASE.mkdir(parents=True, exist_ok=True)
